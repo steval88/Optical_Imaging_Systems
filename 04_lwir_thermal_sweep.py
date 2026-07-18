@@ -34,6 +34,11 @@ TheSystem.New(False)
 # ---------------------------------------------------------------- system data
 SysData = TheSystem.SystemData
 
+# CRITICAL: GERMANIUM is in the INFRARED catalog, which a new system does NOT
+# load by default (only SCHOTT is loaded). Without this line the material
+# assignment silently fails and the "lens" is just two surfaces in air.
+SysData.MaterialCatalogs.AddCatalog("INFRARED")
+
 # f/1.2, EFL 50 mm -> EPD ~ 41.7 mm : typical uncooled LWIR camera speed
 SysData.Aperture.ApertureType = (
     ZOSAPI.SystemData.ZemaxApertureType.EntrancePupilDiameter
@@ -87,6 +92,11 @@ LocalOpt.Close()
 TheSystem.Tools.RemoveAllVariables()
 
 efl = MFE.GetOperandValue(MOT.EFFL, 0, 2, 0, 0, 0, 0, 0, 0)
+if not (10.0 < efl < 500.0):
+    raise RuntimeError(
+        f"Design failed to form (EFL = {efl:.1f} mm). Check that the "
+        "INFRARED catalog loaded and the material name is valid."
+    )
 print(f"Nominal design @ 20 C: EFL = {efl:.3f} mm")
 
 # --------------------------------------------------------------- depth of focus

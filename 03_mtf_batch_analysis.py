@@ -21,6 +21,8 @@ Run:  python 03_mtf_batch_analysis.py
 """
 
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # avoids Qt's OleInitialize/COM clash with pythonnet
 import matplotlib.pyplot as plt
 
 from zos_connection import PythonStandaloneApplication
