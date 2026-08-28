@@ -122,9 +122,15 @@ the verification comb (arithmetic-mean convention in all three, so runs
 with different fom_mode remain comparable), and the DLL ring table is
 re-exported so it always matches the vector actually verified.
 
-Outputs (into the run folder):
-    verify_metrics.json, verify_onaxis.npz, verify_rzmap.npz,
-    mdl_rings_<n>.txt, scripts/run_verify.py (snapshot as run)
+Outputs (per-solver layout, 2026-08-28 -- each solver keeps its data
+and figures in its own subfolder of the run folder; zemax/ set the
+precedent):
+    rs/verify_metrics.json, rs/verify_onaxis.npz, rs/verify_rzmap.npz
+    mdl_rings_<n>.txt        (run ROOT: fabrication-facing artifact,
+                              consumed by the Zemax and GDS stages)
+    scripts/run_verify.py    (snapshot as run)
+Older run folders with the verify_* files at the top level are still
+read transparently by make_plots.py (subfolder first, root fallback).
 
 verify_rzmap.npz holds full I(r, z) intensity maps per verification
 wavelength (the raw data of the paper's Fig. 2e / Fig. 4a tiles),
@@ -197,8 +203,22 @@ if not os.path.exists(os.path.join(run_dir, "config.json")):
         run_dir = alt
 cfg_path = os.path.join(run_dir, "config.json")
 if not os.path.exists(cfg_path):
+    # typo helper: suggest the closest existing run folders
+    hint = ""
+    runs_root = os.path.join(PKG_ROOT, "runs")
+    if os.path.isdir(runs_root):
+        import difflib
+        cands = sorted(os.listdir(runs_root))
+        close = difflib.get_close_matches(os.path.basename(run_dir),
+                                          cands, n=3, cutoff=0.5)
+        if close:
+            hint = "\n  did you mean: " + "  ".join(
+                os.path.join("runs", c) for c in close)
+        elif cands:
+            hint = "\n  most recent run folders: " + "  ".join(
+                os.path.join("runs", c) for c in cands[-3:])
     raise SystemExit("no config.json in %r -- is this a run folder made "
-                     "by run_MDL_design.py?" % run_dir)
+                     "by run_MDL_design.py?%s" % (run_dir, hint))
 cfg = json.load(open(cfg_path))
 der = cfg["derived"]
 
@@ -238,6 +258,11 @@ R = prob.R                           # aperture radius                [um]
 os.makedirs(os.path.join(run_dir, "scripts"), exist_ok=True)
 shutil.copy2(__file__, os.path.join(run_dir, "scripts",
                                     os.path.basename(__file__)))
+
+# per-solver output subfolder (see header "Outputs"): everything this
+# solver produces lands in rs/, mirroring zemax/ for the Zemax stage
+out_rs = os.path.join(run_dir, "rs")
+os.makedirs(out_rs, exist_ok=True)
 
 log("run: %s" % run_dir)
 log("design '%s': D=%.2f mm, F=%.2f mm, NA=%.4f | %d rings x %.2f um, "
@@ -338,13 +363,35 @@ onax = {}
 log("[1/4] on-axis scans |U(0,z)|^2: z = F +/- %.2f mm, %d planes "
     "(exact RS-I on axis; feeds fig_onaxis*.png + z_peak metric)"
     % (cfg["verify_z_span_um"] / 1000, zgrid.size))
+# NOTE on windows: z_peak_um is the GLOBAL argmax over the full scan
+# (F +/- verify_z_span_um). The [3/4] tiles only cover the narrower
+# rzmap window, so when a SATELLITE focus outside the tile window is
+# brighter on axis than the main focus, the two stages report
+# different z. Both use the identical RS-I integral (rs_psf at r0=0
+# reduces exactly to rs_onaxis: J0(0)=1); only the search window
+# differs. z_peak_tile_window_um / the I_main/I_sat ratio below make
+# the comparison explicit.
+tile_span = cfg.get("rzmap_z_span_um", 1000.0)
 for lam in lam_list:
     I = np.abs(rs_onaxis(lam, zgrid)) ** 2
     onax[lam] = I
-    zpk = float(zgrid[np.argmax(I)])
+    ig = int(np.argmax(I))
+    zpk = float(zgrid[ig])
     results.setdefault("z_peak_um", []).append(zpk)
-    log("  lam=%.2f um: peak at z=%.3f mm (offset %+0.0f um from F)"
-        % (lam, zpk / 1000, zpk - F))
+    win = np.where(np.abs(zgrid - F) <= tile_span)[0]
+    iw = win[int(np.argmax(I[win]))]
+    zpk_w = float(zgrid[iw])
+    ratio = float(I[iw] / I[ig])           # 1.0 = main focus IS global peak
+    results.setdefault("z_peak_tile_window_um", []).append(zpk_w)
+    results.setdefault("I_tilewin_over_global", []).append(ratio)
+    if ratio > 0.9999:
+        log("  lam=%.2f um: peak at z=%.3f mm (offset %+0.0f um from F)"
+            % (lam, zpk / 1000, zpk - F))
+    else:
+        log("  lam=%.2f um: main focus z=%.3f mm (in tile window); "
+            "brighter SATELLITE at z=%.3f mm (%+0.0f um), "
+            "I_main/I_sat=%.2f"
+            % (lam, zpk_w / 1000, zpk / 1000, zpk - F, ratio))
 log("[1/4] on-axis scans done")
 
 # ---- PSF metrics at the design focal plane -------------------------------
@@ -412,7 +459,7 @@ for lam in lam_list:
     log("  lam=%.2f um: map done (%.1fs); tile peak at r=%.1f um, "
         "z=%.3f mm" % (lam, time.time() - t_lam, rz_r[irm],
                        rz_z[izm] / 1000))
-np.savez(os.path.join(run_dir, "verify_rzmap.npz"), **rzmaps)
+np.savez(os.path.join(out_rs, "verify_rzmap.npz"), **rzmaps)
 log("[3/4] r-z maps done -> verify_rzmap.npz (arrays: r0grid, zgrid, "
     "I_<nm> per wavelength)")
 
@@ -440,9 +487,9 @@ log("J objective=%.4f   continuous=%.4f   verify-comb=%.4f"
        results["J_verify_comb"]))
 
 # ---- save into the run folder --------------------------------------------
-np.savez(os.path.join(run_dir, "verify_onaxis.npz"), zgrid=zgrid,
+np.savez(os.path.join(out_rs, "verify_onaxis.npz"), zgrid=zgrid,
          **{"I_%d" % int(l * 1000): onax[l] for l in lam_list})
-json.dump(results, open(os.path.join(run_dir, "verify_metrics.json"), "w"),
+json.dump(results, open(os.path.join(out_rs, "verify_metrics.json"), "w"),
           indent=1)
 
 # re-export ring table for the Zemax DLL (heights in mm!) so the table
@@ -452,11 +499,12 @@ with open(ring_path, "w") as f:
     f.write("%d %.9f\n" % (prob.N, prob.delta / 1000.0))
     f.writelines("%.9f\n" % (v / 1000.0) for v in h)
 log("saved into %s:" % os.path.relpath(run_dir))
-log("  verify_metrics.json  scalar metrics per wavelength + J summary")
-log("  verify_onaxis.npz    zgrid + I_<nm>: on-axis scans (fig_onaxis*)")
-log("  verify_rzmap.npz     r0grid, zgrid + I_<nm>: r-z maps "
+log("  rs\\verify_metrics.json  scalar metrics per wavelength + J summary")
+log("  rs\\verify_onaxis.npz    zgrid + I_<nm>: on-axis scans "
+    "(fig_onaxis*)")
+log("  rs\\verify_rzmap.npz     r0grid, zgrid + I_<nm>: r-z maps "
     "(fig_rz_tiles)")
-log("  %s      ring table re-export, matches the verified "
+log("  %s      ring table re-export (run ROOT), matches the verified "
     "vector" % os.path.basename(ring_path))
 rel = os.path.relpath(run_dir)
 log("next:  python %s %s"

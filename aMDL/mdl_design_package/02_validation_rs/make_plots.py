@@ -3,9 +3,16 @@
 STAGE 2a (figures). Usage (from the package root):
     python 02_validation_rs\\make_plots.py runs/<run_folder>
 
-Reads config.json, verify_metrics.json and verify_onaxis.npz from the
-run folder (produced by run_MDL_design.py + run_verify.py) and writes,
-into the same folder:
+Reads config.json (run root), the RS outputs (rs/verify_metrics.json,
+rs/verify_onaxis.npz, rs/verify_rzmap.npz) and, when present, the BPM
+outputs (bpm/bpm_psf.npz) -- per-solver layout, 2026-08-28. Run
+folders from before that date, with those files at the run-folder
+root, are read transparently (subfolder first, root fallback);
+figures are ALWAYS written into the per-solver subfolders, so
+re-plotting an old run upgrades its layout. Figures:
+
+    rs/  RS-derived figures; bpm/  BPM-derived figures; run root:
+    fig_profile.png (the design itself, no solver involved)
 
     fig_onaxis.png    on-axis intensity vs z per wavelength, GLOBALLY
                       normalized (honest relative brightness)
@@ -80,17 +87,34 @@ cfg = json.load(open(cfg_path))
 der = cfg["derived"]
 
 
-def _need(name):
-    p = os.path.join(run_dir, name)
-    if not os.path.exists(p):
-        raise SystemExit("missing %s -- run run_verify.py %s first"
-                         % (p, run_dir))
-    return p
+def _solver_file(sub, name, need=False):
+    """Locate a solver output file: <run>/<sub>/<name> (per-solver
+    layout, 2026-08-28) with fallback to <run>/<name> (older flat run
+    folders). Returns the path or None; need=True exits with a hint."""
+    for p in (os.path.join(run_dir, sub, name),
+              os.path.join(run_dir, name)):
+        if os.path.exists(p):
+            return p
+    if need:
+        raise SystemExit("missing %s (looked in %s%s and run root) -- "
+                         "run the producing solver on %s first"
+                         % (name, sub, os.sep, run_dir))
+    return None
 
 
-onaxis = np.load(_need("verify_onaxis.npz"))
-metrics = json.load(open(_need("verify_metrics.json")))
-m = np.load(_need("m_final.npy"))
+onaxis = np.load(_solver_file("rs", "verify_onaxis.npz", need=True))
+metrics = json.load(open(_solver_file("rs", "verify_metrics.json",
+                                      need=True)))
+m_path = os.path.join(run_dir, "m_final.npy")
+if not os.path.exists(m_path):
+    raise SystemExit("missing %s -- not a design run folder?" % m_path)
+m = np.load(m_path)
+
+# figure destinations (created even for old flat runs: re-plotting
+# upgrades the folder to the per-solver layout)
+FIG_RS = os.path.join(run_dir, "rs")
+FIG_BPM = os.path.join(run_dir, "bpm")
+os.makedirs(FIG_RS, exist_ok=True)
 
 NA = der["na"]
 F_mm = der["focal_um"] / 1000.0
@@ -141,7 +165,7 @@ ax.grid(False)
 cb = fig.colorbar(im, ax=ax, pad=0.01)
 cb.set_label("normalized intensity", fontsize=8)
 fig.tight_layout()
-fig.savefig(os.path.join(run_dir, "fig_onaxis.png"), bbox_inches="tight")
+fig.savefig(os.path.join(FIG_RS, "fig_onaxis.png"), bbox_inches="tight")
 
 # same data, per-wavelength normalization (the paper's Fig. 2e convention:
 # every panel scaled to its own maximum, efficiency differences hidden)
@@ -163,15 +187,15 @@ ax.grid(False)
 cb = fig.colorbar(im, ax=ax, pad=0.01)
 cb.set_label("intensity / per-λ max", fontsize=8)
 fig.tight_layout()
-fig.savefig(os.path.join(run_dir, "fig_onaxis_perlambda.png"),
+fig.savefig(os.path.join(FIG_RS, "fig_onaxis_perlambda.png"),
             bbox_inches="tight")
 
 # ------------------------------------------------------------ fig_rz_tiles
 # Paper Fig. 2e / 4a convention: one r-z intensity tile per wavelength,
 # each tile normalized to its own maximum, dashed line at the design
 # focus. The radial half-profile is mirrored to +/-r for display.
-rz_npz = os.path.join(run_dir, "verify_rzmap.npz")
-if os.path.exists(rz_npz):
+rz_npz = _solver_file("rs", "verify_rzmap.npz")
+if rz_npz is not None:
     rz = np.load(rz_npz)
     r0 = rz["r0grid"]
     zz = rz["zgrid"] / 1000.0                       # mm
@@ -204,7 +228,7 @@ if os.path.exists(rz_npz):
                  "(paper Fig. 2e convention)" % cfg["name"],
                  fontsize=10, y=1.02)
     fig.tight_layout()
-    fig.savefig(os.path.join(run_dir, "fig_rz_tiles.png"),
+    fig.savefig(os.path.join(FIG_RS, "fig_rz_tiles.png"),
                 bbox_inches="tight")
 
 # -------------------------------------------------------- fig_rz_tiles_bpm
@@ -214,8 +238,9 @@ if os.path.exists(rz_npz):
 # bpm_validate.py into bpm_psf.npz (keys rz_r0grid, rz_zgrid,
 # Irz_bpm_<nm>; Irz_te_<nm> is the TE twin on the same grids). Skipped
 # silently for bpm_psf.npz files from before this key existed.
-bpm_npz_p = os.path.join(run_dir, "bpm_psf.npz")
-if os.path.exists(bpm_npz_p):
+bpm_npz_p = _solver_file("bpm", "bpm_psf.npz")
+if bpm_npz_p is not None:
+    os.makedirs(FIG_BPM, exist_ok=True)
     bz = np.load(bpm_npz_p)
     if "rz_r0grid" in bz.files:
         r0 = bz["rz_r0grid"]
@@ -249,7 +274,7 @@ if os.path.exists(bpm_npz_p):
                      "propagation — %s" % cfg["name"],
                      fontsize=10, y=1.02)
         fig.tight_layout()
-        fig.savefig(os.path.join(run_dir, "fig_rz_tiles_bpm.png"),
+        fig.savefig(os.path.join(FIG_BPM, "fig_rz_tiles_bpm.png"),
                     bbox_inches="tight")
         print("fig_rz_tiles_bpm.png written (BPM wavelengths: %s nm)"
               % ", ".join(str(t) for t in tlams))
@@ -280,7 +305,7 @@ ax.set_title("Spot size at z = F (where a focus exists)", fontsize=9)
 ax.legend(fontsize=8, frameon=False)
 ax.set_ylim(0, max(3.0, 1.3 * np.nanmax(metrics["fwhm_um"])))
 fig.tight_layout()
-fig.savefig(os.path.join(run_dir, "fig_metrics.png"), bbox_inches="tight")
+fig.savefig(os.path.join(FIG_RS, "fig_metrics.png"), bbox_inches="tight")
 
 # ------------------------------------------------------------ fig_profile
 h = m * dh_um
@@ -308,8 +333,9 @@ fig.savefig(os.path.join(run_dir, "fig_profile.png"), bbox_inches="tight")
 # Each panel is one wavelength; both curves share the panel's TE peak
 # normalization so the BPM curve directly shows the model error in
 # peak height as well as in shape.
-bpm_npz = os.path.join(run_dir, "bpm_psf.npz")
-if os.path.exists(bpm_npz):
+bpm_npz = _solver_file("bpm", "bpm_psf.npz")
+if bpm_npz is not None:
+    os.makedirs(FIG_BPM, exist_ok=True)
     bp = np.load(bpm_npz)
     r0 = bp["r0grid"]
     blams = sorted(int(k.split("_")[2]) for k in bp.files
@@ -343,7 +369,7 @@ if os.path.exists(bpm_npz):
                  "through the real relief — %s" % cfg["name"],
                  fontsize=10)
     fig.tight_layout()
-    fig.savefig(os.path.join(run_dir, "fig_bpm_psf.png"),
+    fig.savefig(os.path.join(FIG_BPM, "fig_bpm_psf.png"),
                 bbox_inches="tight")
 
     # BPM on-axis maps (only when bpm_validate.py stored the z-scans;
@@ -375,15 +401,17 @@ if os.path.exists(bpm_npz):
             cb = fig.colorbar(im, ax=ax, pad=0.01)
             cb.set_label(cbl, fontsize=8)
             fig.tight_layout()
-            fig.savefig(os.path.join(run_dir, tag), bbox_inches="tight")
+            fig.savefig(os.path.join(FIG_BPM, tag), bbox_inches="tight")
 
 rel = os.path.relpath(run_dir)
 ring = "mdl_rings_%d.txt" % cfg["dll_file_no"]
-print("figures saved into %s" % rel)
+print("figures saved into %s (rs%s + bpm%s per-solver subfolders; "
+      "fig_profile.png at the run root)" % (rel, os.sep, os.sep))
 print("next (Zemax):   copy %s + the DLLs from 02_validation_zemax/dll "
       "into Documents/Zemax/DLL/Surfaces, then run "
-      "02_validation_zemax/mdl_zemax_validation.py on the Zemax machine"
-      % os.path.join(rel, ring))
+      "02_validation_zemax/mdl_zemax_validation.py on the Zemax machine "
+      "(writes into %s)"
+      % (os.path.join(rel, ring), os.path.join(rel, "zemax")))
 print("next (tape-out): python %s --rings %s --out %s"
       % (os.path.join("03_tapeout", "export_gds.py"),
-         os.path.join(rel, ring), os.path.join(rel, "mdl.gds")))
+         os.path.join(rel, ring), os.path.join(rel, "gds", "mdl.gds")))

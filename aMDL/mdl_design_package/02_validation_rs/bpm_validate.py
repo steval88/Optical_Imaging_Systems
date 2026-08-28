@@ -10,9 +10,12 @@ Usage (from the package root):
     python 02_validation_rs\\bpm_validate.py runs\\<run_folder>
 
 Reads geometry, ring table and wavelengths from the run folder's
-config.json; writes bpm_validation.json into the same folder. By
-default a coarse wavelength subset (every 3rd verification wavelength)
-is used because the BPM is the expensive step; override by adding
+config.json; writes bpm_validation.json + bpm_psf.npz into the run
+folder's bpm/ subfolder (per-solver layout, 2026-08-28: each solver
+keeps its data and figures in its own subfolder -- rs/, bpm/, zemax/,
+gds/; make_plots.py still reads older flat run folders). By default a
+coarse wavelength subset (every 3rd verification wavelength) is used
+because the BPM is the expensive step; override by adding
 "bpm_wavelengths_um": [...] to the config dictionary.
 
 ===========================================================================
@@ -411,10 +414,14 @@ for lam in LAMS:
         "FWHM TE=%.2f BPM=%.2f um  (%.0fs)"
         % (lam, ov, et, eb, ft, fb, time.time() - t0))
 
-out_json = os.path.join(run_dir, "bpm_validation.json")
+# per-solver output subfolder (mirrors rs/ and zemax/)
+out_bpm = os.path.join(run_dir, "bpm")
+os.makedirs(out_bpm, exist_ok=True)
+out_json = os.path.join(out_bpm, "bpm_validation.json")
 json.dump(results, open(out_json, "w"), indent=1)
-np.savez(os.path.join(run_dir, "bpm_psf.npz"), **psf_store)
-log("saved bpm_validation.json, bpm_psf.npz")
+np.savez(os.path.join(out_bpm, "bpm_psf.npz"), **psf_store)
+log("saved bpm%sbpm_validation.json, bpm%sbpm_psf.npz"
+    % (os.sep, os.sep))
 log("reading: eff/FWHM differences TE vs BPM = the thin-element model "
     "error; overlap ~ 1 means the phase-screen model is faithful.")
 log("next:  python %s %s   (adds fig_bpm_psf.png)"
