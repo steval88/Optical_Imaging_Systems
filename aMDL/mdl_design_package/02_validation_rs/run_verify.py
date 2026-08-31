@@ -116,7 +116,27 @@ METRICS reported per verification wavelength
                 quadrature (discretization bias cancels in the ratio).
                 "Strehl-like" because the reference is the perfect
                 hyperbolic phase at that wavelength, not a best-fit
-                sphere.
+                sphere. EFFICIENCY-INCLUSIVE: for a diffraction-
+                limited core, strehl_like ~ encircled efficiency, so
+                low values mean halo/other-order loss, NOT
+                aberration. Family of the paper's Supplementary S3-6
+                "Normalized Strehl ratio" (S1-S5 avg 0.66/0.49/0.28/
+                0.14/0.05) -- theirs normalizes by power reaching the
+                focal plane, ours (stricter) by total incident power.
+* strehl_shape: the paper's Fig. 4f convention (ref. 43 of [4]) --
+                Strehl from the PSF normalized to the power CAPTURED
+                IN THE MEASUREMENT WINDOW (the CCD analogue:
+                r <= verify_r_max_um):
+                  S = [max I / P_win] / [max I_ideal / P_win,ideal],
+                  P_win = INT_window I(r) 2 pi r dr,
+                ideal = the same-quadrature ideal-lens PSF. SHAPE-
+                ONLY: diffraction efficiency cancels; this answers
+                "is the focal spot diffraction-limited in form?".
+                Window-dependent (a wider window admits more halo and
+                lowers it); the paper's CCD frames are ~ +/-10-15 um.
+                Compare strehl_shape to Fig. 4f and strehl_like to
+                the Supplementary Normalized Strehl -- NEVER across
+                conventions.
 Also reported: J on the design objective, on the continuous band and on
 the verification comb (arithmetic-mean convention in all three, so runs
 with different fom_mode remain comparable), and the DLL ring table is
@@ -156,7 +176,8 @@ REFERENCES
 [4] Y. Xiao et al., "Large-scale achromatic flat lens by light
     frequency-domain coherence optimization," Light Sci. Appl. 11, 323
     (2022). (The design method being reproduced; RS validation in
-    Fig. 2e cites [1] as its ref. 46.)
+    Fig. 2e cites [1] as its ref. 46; measured Strehl in Fig. 4f and
+    Supplementary S3-6.)
 [5] NIST DLMF Eq. 10.9.2 (https://dlmf.nist.gov/10.9), equivalently
     M. Abramowitz & I. A. Stegun, Handbook of Mathematical Functions,
     Eq. 9.1.21: the integral representation of J0.
@@ -354,6 +375,26 @@ def ideal_peak(lam):
     return abs((F / (1j * lam)) * 2 * pi * drho * np.sum(integ))
 
 
+def ideal_profile(lam, r0grid):
+    """Focal-plane PSF |U_ideal(r0, F)|^2 of the IDEAL lens (same R,
+    F, quadrature): the exact hyperbolic phase propagated by the same
+    J0-reduced RS-I as rs_psf. Reference for the strehl_shape metric
+    (paper Fig. 4f convention -- see header METRICS): computing the
+    ideal PSF with the identical quadrature makes discretization bias
+    cancel in the shape-Strehl ratio, exactly as ideal_peak does for
+    strehl_like."""
+    k = 2 * pi / lam
+    rb0 = np.sqrt(rho * rho + F * F)
+    E0 = np.exp(-1j * k * (rb0 - F))
+    out = np.empty(r0grid.size, dtype=complex)
+    for ir, r0 in enumerate(r0grid):
+        rb = np.sqrt(F * F + rho * rho + r0 * r0)
+        integ = E0 * j0(k * rho * r0 / rb) * np.exp(1j * k * rb) / rb ** 2 \
+            * rho
+        out[ir] = (F / (1j * lam)) * 2 * pi * drho * np.sum(integ)
+    return np.abs(out) ** 2
+
+
 # ---- on-axis scans (focal shift / achromaticity, paper Fig. 2e) ----------
 results = {"run_dir": run_dir, "m_file": m_file,
            "lam_um": lam_list.tolist(), "F_um": F}
@@ -397,12 +438,14 @@ log("[1/4] on-axis scans done")
 # ---- PSF metrics at the design focal plane -------------------------------
 r0grid = np.linspace(0.0, cfg["verify_r_max_um"], cfg["verify_r_points"])
 psf_metrics = {"fwhm_um": [], "eff_3fwhm": [], "strehl_like": [],
-               "onax_I_at_F": []}
+               "strehl_shape": [], "onax_I_at_F": []}
 log("[2/4] focal-plane PSFs |U(r,F)|^2: r = 0..%g um, %d points "
     "(feeds fig_metrics.png)"
     % (cfg["verify_r_max_um"], r0grid.size))
 log("      columns: FWHM | dl = diffraction limit lam/2NA | eff = power "
-    "in 3xFWHM-diameter disc / total incident | S = peak vs ideal lens")
+    "in 3xFWHM-diameter disc / total incident | S = peak vs ideal lens "
+    "(efficiency-inclusive) | Sshape = window-normalized shape Strehl "
+    "(paper Fig. 4f convention; efficiency cancels)")
 for lam in lam_list:
     E = rs_psf(lam, F, r0grid)
     I = np.abs(E) ** 2
@@ -419,13 +462,25 @@ for lam in lam_list:
     p_in = np.trapezoid(I[sel] * 2 * pi * r0grid[sel], r0grid[sel])
     p_tot = pi * R * R          # unit-amplitude plane wave over aperture
     ideal = ideal_peak(lam)
+    # shape Strehl (header METRICS, paper Fig. 4f convention): both
+    # PSFs normalized to the power captured in the r0grid window (the
+    # CCD analogue), so diffraction efficiency cancels and only core
+    # fidelity remains. Ideal reference: same-quadrature ideal-lens
+    # PSF on the same window.
+    I_id = ideal_profile(lam, r0grid)
+    p_win = np.trapezoid(I * 2 * pi * r0grid, r0grid)
+    p_win_id = np.trapezoid(I_id * 2 * pi * r0grid, r0grid)
+    s_shape = float((I.max() / p_win) / (I_id.max() / p_win_id)) \
+        if p_win > 0 else float("nan")
     psf_metrics["fwhm_um"].append(float(fwhm))
     psf_metrics["eff_3fwhm"].append(float(p_in / p_tot))
     psf_metrics["strehl_like"].append(float(Ipk / ideal ** 2))
+    psf_metrics["strehl_shape"].append(s_shape)
     psf_metrics["onax_I_at_F"].append(float(I[0]))
-    log("  lam=%.2f: FWHM=%.2f um (dl %.2f), eff=%.3f, S=%.3f"
+    log("  lam=%.2f: FWHM=%.2f um (dl %.2f), eff=%.3f, S=%.3f, "
+        "Sshape=%.3f"
         % (lam, fwhm, lam / (2 * na), psf_metrics["eff_3fwhm"][-1],
-           psf_metrics["strehl_like"][-1]))
+           psf_metrics["strehl_like"][-1], s_shape))
 results.update(psf_metrics)
 
 # ---- r-z intensity maps (raw data of the paper's Fig. 2e/4a tiles) -------
@@ -493,7 +548,7 @@ json.dump(results, open(os.path.join(out_rs, "verify_metrics.json"), "w"),
           indent=1)
 
 # re-export ring table for the Zemax DLL (heights in mm!) so the table
-# always matches the vector that was actually verified
+# always matches the vector actually verified
 ring_path = os.path.join(run_dir, "mdl_rings_%d.txt" % cfg["dll_file_no"])
 with open(ring_path, "w") as f:
     f.write("%d %.9f\n" % (prob.N, prob.delta / 1000.0))

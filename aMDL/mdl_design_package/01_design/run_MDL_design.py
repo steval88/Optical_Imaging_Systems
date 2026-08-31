@@ -42,7 +42,7 @@ import numpy as np
 PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PKG_ROOT)
 
-from mdl_core_Dev_v1 import (MDLProblem, PAPER_COMB_14, multistep_GA_HJA_combo,
+from mdl_core import (MDLProblem, PAPER_COMB_14, multistep_GA_HJA_combo,
                       search, smooth, gradient_refine, hooke_jeeves,
                       seed_harmonic, seed_echelle, upper_bound_jf,
                       extract_local_gratings, write_zone_table,

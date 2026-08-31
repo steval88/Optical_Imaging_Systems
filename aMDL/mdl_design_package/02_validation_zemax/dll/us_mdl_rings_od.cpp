@@ -45,8 +45,18 @@
                         shows the multi-order achromat (paper Fig. 4)
      Par 3 : Design P   fold harmonic of the design (S3: 17 @ 0.55)
      Par 4 : Lam0 um    design wavelength in MICRONS
-     Par 5 : Add OPL    1 = add the diffractive phase OPL to the ray
-                        path (OPD fans meaningful), 0 = bend only
+     Par 5 : Add OPL    1 = imprint the diffractive phase OPL on the
+                        ray (OPD fans/wavefront meaningful), 0 = bend
+                        only. v2 (2026-08-31): injected through the
+                        INTERCEPT POSITION, z = +s*Ou/n2 -- the OPD law
+                        measured on this OpticStudio is
+                        OPD_contribution = +n2*z_intercept and UD->path
+                        is IGNORED by the OPD accounting (see
+                        us_mdl_rings.cpp v4 header for the calibration
+                        evidence); the original UD->path route was
+                        silently inert. Ray directions are unchanged;
+                        the um-scale intercept shift is geometrically
+                        negligible.
      Par 6 : Use eff    1 = apply sinc^2 order efficiency as relative
                         transmission, 0 = unit transmission
 
@@ -407,6 +417,19 @@ UserDefinedSurface(USER_DATA *UD, FIXED_DATA *FD)
         /* order-m, wavelength-scaled phase-gradient factor            */
         double s = (m_ord / P) * (lam / lam0);
 
+        /* v2 phase imprint (Par 5): through the INTERCEPT POSITION --
+           the measured OPD law is +n2*z_intercept, UD->path ignored
+           (calibrated 2026-08-31, see us_mdl_rings.cpp v4). Applied
+           BEFORE the bend, along the incoming direction.             */
+        if (FD->param[5] > 0.5 && FD->n2 != 0.0 && UD->n != 0.0) {
+            double dz = s * Ou / FD->n2;         /* OPL = +n2*z [mm]  */
+            double tstep = (dz - UD->z) / UD->n;
+            UD->x += tstep * UD->l;
+            UD->y += tstep * UD->m;
+            UD->z  = dz;
+            UD->path = tstep;
+        }
+
         /* grating equation on the transverse wavevector               */
         double ux = 0.0, uy = 0.0;
         if (r > 0.0) { ux = UD->x / r; uy = UD->y / r; }
@@ -417,11 +440,6 @@ UserDefinedSurface(USER_DATA *UD, FIXED_DATA *FD)
         UD->l = Tx / FD->n2;
         UD->m = Ty / FD->n2;
         UD->n = sqrt(1.0 - UD->l * UD->l - UD->m * UD->m);
-
-        /* diffractive phase OPL = phi * lam / 2pi = s * Ou  [mm];
-           OpticStudio multiplies path by n1 -> divide it out          */
-        if (FD->param[5] > 0.5 && FD->n1 != 0.0)
-            UD->path = s * Ou / FD->n1;
 
         /* scalar order efficiency (ideal sawtooth + dispersion)       */
         if (FD->param[6] > 0.5) {

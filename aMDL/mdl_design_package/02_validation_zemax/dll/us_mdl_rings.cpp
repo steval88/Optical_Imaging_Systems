@@ -4,11 +4,39 @@
 
  Zemax OpticStudio User-Defined Surface DLL:
  Multilevel Diffractive Lens (MDL) as a stepped ring relief
- ("zone decomposition" -- the real staircase profile is ray traced, so
- all diffraction orders, their efficiencies and the chromatic behavior
- emerge physically, cf. the Ansys KB article "Realistic modeling of
- relief-type diffractive intraocular lenses using User-Defined Surface
- DLLs").
+ ("zone decomposition").
+
+ v4 PHASE MODEL (2026-08-31) ------------------------------------------
+ Zemax's UDS OPD accounting was CALIBRATED by experiment on the s3
+ softmin design (batch ray trace, null-subtracted against a flat
+ reference):
+   v1 (physical staircase intercept at z=+h, UD->path = step):
+       imprinted OPD = -1.000*h, wavelength-FLAT -- the CONJUGATE of
+       the sag, no index factor: neither the substrate index nor
+       UD->path entered.
+   v2 (flat intercept, phase injected via UD->path = OPL/n1):
+       imprinted OPD = 0 exactly -- UD->path is IGNORED by the OPD
+       accounting.
+ Unique law consistent with both (SIGN CALIBRATED against the
+ canonical ring table on the v3 run of 2026-08-31: traced profile
+ equaled -(h - h0) to 1.7e-11 um when dz carried the minus sign):
+ OPD_contribution = +n2 * z_intercept (UD->path ignored).
+
+ v4 therefore injects the transmitted phase THROUGH THE INTERCEPT
+ POSITION: the ray is intercepted at
+
+     z = +zsign * scale * (n(lam) - 1) * h(rho) / n2
+
+ so the position-based accounting yields exactly the design phase
+ +zsign*scale*(n(lam)-1)*h, with the DLL's own exact Cauchy (same fit
+ as mdl_core.n_az4562 and the od DLL -- keep the three in sync). The
+ um-scale displacement is geometrically negligible (straight rays,
+ mm-scale gaps). For straight rays at normal incidence this is
+ mathematically identical to the traced staircase -- the zone model's
+ entire content is the OPD. The sag (case 3) still reports the
+ physical staircase for drawings/cross-sections. Every v1 OPD-based
+ result (FFT PSFs included) traced the conjugate phase -h/lam and is
+ retro-invalidated; ray-geometry checks (err=0) were always fine.
 
  Surface model
  -------------
@@ -29,18 +57,12 @@
  LDE parameters
  --------------
      Par 1 : File #        integer ID of the ring table file
-     Par 2 : Height scale  multiplies all heights (default 1.0)
+     Par 2 : Height scale  multiplies all heights (default 1.0;
+                           0 = flat null reference for OPD tests)
      Par 3 : Z sign        +1: relief toward +z, -1: toward -z
+                           (flips the sign of the injected phase)
      Par 4 : Parax f       paraxial focal length in lens units
                            (0 = treat as plane parallel plate)
-
- Ray trace
- ---------
- The staircase intercept is found by fixed-point iteration on the ring
- index (converges in <= 3 steps for realistic rays; vertical side walls
- are not modeled -- standard thin-relief assumption, valid when the ray
- obliquity on the relief is moderate). Refraction is plain Snell's law
- on the locally flat ring top, i.e. the zone-decomposition model.
 
  Build (Visual Studio):
      cl /LD /O2 us_mdl_rings.cpp /Fe:us_mdl_rings.dll
@@ -90,6 +112,13 @@
 #include <cstring>
 
 #include "usersurf.h"
+
+/* AZ4562 Cauchy (lam in um) -- the SAME fit as mdl_core.n_az4562 and
+   us_mdl_rings_od.cpp; keep the three in sync if the material changes */
+static const double N_CAUCHY_A = 1.594;
+static const double N_CAUCHY_B = 0.01152;
+static double n_resist(double lam_um)
+{ return N_CAUCHY_A + N_CAUCHY_B / (lam_um * lam_um); }
 
 /* ------------------------------------------------------------------ */
 /* module state: ring table cache (per file ID), thread safe          */
@@ -239,7 +268,8 @@ UserDefinedSurface(USER_DATA *UD, FIXED_DATA *FD)
         break;
 
     case 3: {
-        /* sag at UD->x, UD->y */
+        /* sag at UD->x, UD->y: the physical staircase (drawings and
+           cross-sections; the traced PHASE is injected in case 5) */
         UD->sag1 = 0.0;
         UD->sag2 = 0.0;
         RingTable *t = get_table((int)(FD->param[1] + 0.5));
@@ -267,40 +297,65 @@ UserDefinedSurface(USER_DATA *UD, FIXED_DATA *FD)
         break; }
 
     case 5: {
-        /* real ray trace: intersect the staircase, then refract       */
+        /* real ray trace, v2: TEA phase injection at the tangent
+           plane (see header "v2 PHASE MODEL"). The surface is traced
+           as a PLANE (no geometric displacement -- identical to the
+           staircase for normal incidence, where the whole model
+           content is the OPD) and the transmitted phase is added as
+           optical path:
+
+               OPL = zsign * scale * (n(lam) - 1) * h(rho)   [mm]
+
+           via UD->path. OpticStudio multiplies path by n1, so the
+           value is divided by n1 -- the injection mechanism verified
+           in us_mdl_rings_od.cpp (od OPD analyses match congruence
+           theory exactly). n(lam) is the DLL's own exact Cauchy, so
+           the phase no longer depends on how the LDE approximates the
+           substrate material.                                        */
         RingTable *t = get_table((int)(FD->param[1] + 0.5));
         double scale = FD->param[2];
         double zsign = FD->param[3];
 
         if (!t) return -1;                       /* table missing      */
-        if (UD->n == 0.0) return FD->surf;       /* ray parallel to    */
-                                                 /* the surface plane  */
-        /* fixed-point iteration on the RING INDEX: within one ring the
-           surface is the plane z = h_i, whose ray intercept is exact;
-           iterate until the assumed ring contains the intercept.
-           (Vertical side walls are not modeled: a ray landing exactly
-           on a boundary keeps the last assumption -- the standard
-           thin-relief / zone-decomposition approximation.)            */
-        double rho0 = sqrt(UD->x * UD->x + UD->y * UD->y);
-        int    i_as = (int)(rho0 / t->delta);
-        double x = UD->x, y = UD->y, zplane = 0.0, tstep = 0.0;
-        for (int it = 0; it < 16; ++it) {
-            zplane = (i_as >= 0 && i_as < t->n)
-                     ? zsign * scale * t->h[i_as] : 0.0;
-            tstep = (zplane - UD->z) / UD->n;    /* from tangent plane */
-            x = UD->x + tstep * UD->l;
-            y = UD->y + tstep * UD->m;
-            double rho = sqrt(x * x + y * y);
-            int i_new = (int)(rho / t->delta);
-            if (i_new >= t->n) i_new = t->n;     /* outside: substrate */
-            if (i_new == i_as) break;
-            i_as = i_new;
-        }
-        UD->x = x; UD->y = y; UD->z = zplane;
-        UD->path = tstep;
 
-        /* normal of the locally flat ring top                          */
+        /* v3 MEASURED OPD LAW (2026-08-31, batch-trace calibration on
+           the s3 softmin design): OpticStudio IGNORES UD->path in its
+           OPD accounting for UDS surfaces and derives the surface
+           contribution from the INTERCEPT POSITION instead:
+
+               OPD_contribution = -n2 * z_intercept
+
+           (v1, intercept at z=+h: imprinted -1.000*h, lam-flat --
+           the CONJUGATE phase; v2, path-injection at z=0: imprinted
+           exactly 0). The phase is therefore injected through the
+           position: displace the intercept to
+
+               z = +zsign*scale*(n(lam)-1)*h(rho) / n2   (law: +n2*z)
+
+           so the position-based accounting yields exactly
+           +zsign*scale*(n(lam)-1)*h -- the design phase, with the
+           DLL's own exact Cauchy. The um-scale displacement is
+           geometrically negligible (straight rays, mm gaps).        */
         UD->ln = 0.0; UD->mn = 0.0; UD->nn = -1.0;
+
+        double rho = sqrt(UD->x * UD->x + UD->y * UD->y);
+        int i = (int)(rho / t->delta);
+        double h = (i >= 0 && i < t->n) ? t->h[i] : 0.0;   /* mm      */
+
+        double dz = 0.0;
+        if (FD->n2 != 0.0) {
+            double nl = n_resist(FD->wavelength);   /* lam in um      */
+            /* SIGN: OPD law is +n2*z (calibrated to 1.7e-11 um
+               against the canonical table, 2026-08-31)             */
+            dz = zsign * scale * (nl - 1.0) * h / FD->n2;
+        }
+        double tstep = (UD->n != 0.0) ? (dz - UD->z) / UD->n : 0.0;
+        UD->x += tstep * UD->l;
+        UD->y += tstep * UD->m;
+        UD->z  = dz;
+        UD->path = tstep;      /* geometric step (ignored by the OPD
+                                  accounting -- measured -- but kept
+                                  truthful for any engine that uses it) */
 
         if (Refract(FD->n1, FD->n2, &UD->l, &UD->m, &UD->n,
                     UD->ln, UD->mn, UD->nn) == -1)
