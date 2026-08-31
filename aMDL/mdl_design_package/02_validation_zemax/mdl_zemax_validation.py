@@ -387,6 +387,23 @@ def main():
             raise SystemExit(
                 "your zos_connection.py has no 'mode' parameter -- "
                 "update it to the version with extension support")
+        except Exception as exc:
+            raise SystemExit(
+                "extension connection failed (%s: %s).\n"
+                "Almost always one of these -- your license is fine "
+                "(standalone runs prove it):\n"
+                "  1. the Interactive Extension tile is not WAITING: "
+                "in OpticStudio, Programming tab -> Interactive "
+                "Extension must show 'Waiting for connection' AT THE "
+                "MOMENT this script starts (re-click it if it timed "
+                "out), or\n"
+                "  2. an orphaned headless OpticStudio from an earlier "
+                "standalone run is holding the license seat: check "
+                "Task Manager for extra OpticStudio processes and end "
+                "them.\n"
+                "Then re-run with 'gui'; or drop 'gui' to run "
+                "headless as before."
+                % (type(exc).__name__, exc))
     else:
         zos = PythonStandaloneApplication()
     ZOSAPI = zos.ZOSAPI
