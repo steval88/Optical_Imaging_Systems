@@ -241,14 +241,37 @@ static int Refract(double thisn, double nextn, double *l, double *m,
 
 extern "C" {
 
+/* ENTRY POINT v3 (2026-09-04). Ported from the original
+   UserDefinedSurface/FIXED_DATA for two MEASURED reasons:
+   (a) POP: OpticStudio decides per DLL whether a User Defined
+       Surface may be propagated by physical optics; with the v1
+       entry point it forced 'Use Rays To Propagate' on and the
+       ray hand-off aborted ('Computation aborted; invalid
+       results!'), while its own us_stand.dll (v3) propagated.
+   (b) case 0 sub-queries: the v1 code answered EVERY numb with
+       the surface name -- including numb 2 ('is this a GRIN
+       medium?'), where a NON-EMPTY string means YES. A GRIN
+       medium must be ray-propagated: that alone explains the
+       forced flag. Now: numb 0 name, 1 '1' (rotationally
+       symmetric), 2 '' (not GRIN).
+   Also: unknown request types return 0 (us_stand.c behaviour),
+   not -1 -- POP issues types the v1 code treated as errors;
+   case 7 zeroes all parameters via max_parameter; cases 8/9
+   (first/last call) are served. Ray-trace physics (cases 3-6)
+   is UNCHANGED; the rz self-check must still read 0.0000. */
 int __declspec(dllexport) APIENTRY
-UserDefinedSurface(USER_DATA *UD, FIXED_DATA *FD)
+UserDefinedSurface3(USER_DATA *UD, FIXED_DATA3 *FD)
 {
     switch (FD->type) {
 
     case 0:
-        /* general information: surface name */
-        strcpy(UD->string, "MDL Rings");
+        /* general information -- FD->numb selects the query */
+        switch (FD->numb) {
+        case 0:  strcpy(UD->string, "MDL Rings"); break;  /* name */
+        case 1:  strcpy(UD->string, "1");  break;  /* rotationally symmetric: any char = yes */
+        case 2:  UD->string[0] = '\0';    break;  /* GRIN medium: EMPTY = no */
+        default: UD->string[0] = '\0';    break;
+        }
         break;
 
     case 1:
@@ -368,16 +391,28 @@ UserDefinedSurface(USER_DATA *UD, FIXED_DATA *FD)
         UD->dndx = UD->dndy = UD->dndz = 0.0;
         break;
 
-    case 7:
-        /* safe/default parameter values */
+    case 7: {
+        /* safe/default values: zero everything OpticStudio exposes, then ours */
+        int i;
+        for (i = 0; i <= FD->max_parameter && i < 201; i++) FD->param[i] = 0.0;
+        for (i = 0; i <= FD->max_extradata && i < 501; i++) FD->xdata[i] = 0.0;
         FD->param[1] = 1.0;   /* File #       */
         FD->param[2] = 1.0;   /* Height scale */
         FD->param[3] = 1.0;   /* Z sign       */
         FD->param[4] = 0.0;   /* Parax f      */
+        break; }
+
+    case 8:
+        /* first call: nothing to pre-allocate (tables load lazily) */
+        break;
+
+    case 9:
+        /* last call: nothing to release that the process will not */
         break;
 
     default:
-        return -1;
+        /* unknown request type: NOT an error (us_stand.c returns 0) */
+        break;
     }
     return 0;
 }

@@ -14,10 +14,21 @@ ZOS-API, using the "MDL Rings" User-Defined Surface DLLs:
                 chromatic focal shift, ray fans) are meaningful, one
                 order per pass; Order m = 0 selects the dominant
                 (blazed) order per wavelength (camera view).
+    rz mode   : batch-OPD route -- Zemax-traced field, RS-propagated
+                to I(r,z) tiles (the intensity closure vs rs/).
+    pop mode  : PHYSICAL OPTICS PROPAGATION ladder (2026-09-04). The
+                only Zemax engine that propagates the FIELD and so does
+                not need rays to converge: every ray-based image
+                analysis (FFT PSF/MTF, Huygens PSF/MTF) is afocal on
+                the zone surface (measured: implied working F/# ~1e4).
+                pop <rung> [lams] [samp]; rung 1 = paraxial ideal lens
+                vs Airy (instrument), 2 = od DLL (POP through our UDS
+                phase), 3 = zone DLL vs rs/verify_rzmap.npz (THE test).
+                See POP_SETTINGS below.
 
 Usage (run on the machine with OpticStudio + pythonnet):
 
-    python mdl_zemax_validation.py <run-folder-or-design> [zone|od]
+    python mdl_zemax_validation.py <run-folder-or-design> [zone|od|rz|pop ...]
 
 <run-folder-or-design> is preferably a RUN FOLDER produced by
 run_MDL_design (e.g. runs\\20260825_165039_s3_comb_softmin_overlap):
@@ -107,6 +118,66 @@ DESIGNS = {
 }
 
 SUBSTRATE_MM = 1.1
+
+# ---------------------------------------------------------------------------
+# POP (Physical Optics Propagation) validation-tool settings -- the knobs
+# of the INSTRUMENT, not of the design (design geometry comes from the run
+# folder). Command line: pop <rung> [lams] [samp]   overrides samp.
+#   rung 1 = PARAXIAL ideal lens (F = BFD): validates POP setup/sampling/
+#            units against the analytic Airy pattern -- nothing about our
+#            DLLs yet.
+#   rung 2 = od DLL (rays converge, carrier only): validates POP's
+#            surface-transfer THROUGH our UDS phase.
+#   rung 3 = zone DLL (phase-only, rays straight): THE test. The pilot
+#            beam is tracked PARAXIALLY and this surface has zero paraxial
+#            power -> POP may pick the collimated (angular-spectrum,
+#            fixed-grid) regime and under-resolve the converging phase.
+#            Measured, not assumed: compare against rs/verify_rzmap.npz.
+# samp: POP grid per axis (power of 2). The rim fold period is ~46 um over
+#   a 10.24 mm aperture -> >= 445 samples resolve it; in the fixed-grid
+#   regime the FOCAL SPOT must also be resolved on the same grid:
+#   width_mm / samp = 12 mm / 4096 = 2.9 um (marginal for the 2-3 um
+#   FWHM at 400-550 nm; fine above 700 nm), 8192 -> 1.5 um.
+# width_mm: beam grid width; must cover the 10.24 mm aperture with margin.
+# angular_spectrum: None = let POP decide (echoed); True/False forces the
+#   surface-2 propagator flag (surface Physical Optics tab) when the API
+#   exposes it.
+# ---------------------------------------------------------------------------
+def zloc(v):
+    """Format a number for ZPL MODIFYSETTINGS on THIS machine.
+
+    MEASURED 2026-09-04 (Italian Windows): OpticStudio parses the
+    ModifySettings value with the SYSTEM locale -- '5.12' was read as
+    512 (the dot swallowed as a thousands separator): POP_PARAM1 = 5.12
+    mm became a 512 mm waist, NaN pilot beam, no data. Floats must
+    therefore carry the locale decimal separator ('5,12' here, '5.12'
+    on an English system). Integers are unaffected. The locale is set
+    only for the formatting call and restored immediately.
+    """
+    if isinstance(v, float):
+        try:
+            import locale
+            old = locale.setlocale(locale.LC_NUMERIC)
+            try:
+                locale.setlocale(locale.LC_NUMERIC, "")
+                return locale.str(v)
+            finally:
+                locale.setlocale(locale.LC_NUMERIC, old)
+        except Exception:
+            return str(v)
+    return str(v)
+
+
+POP_SETTINGS = {
+    "samp": 4096,
+    "width_mm": 12.0,
+    "start_surface": 1,          # beam defined at the substrate front
+    "angular_spectrum": None,    # None / True / False (surface 2 flag)
+    "beam": "tophat",            # uniform plane-wave illumination
+    "r_max_um": 20.0,            # radial comparison window (= rs tiles)
+    "rung_default_lams": {0: "primary", 1: "primary", 2: "primary",
+                          3: "verify"},
+}
 
 
 def design_from_run_folder(run_dir):
@@ -224,9 +295,21 @@ def main():
     GUI = len(argv) != len(sys.argv)
     arg = argv[1] if len(argv) > 1 else "s3"
     mode = argv[2] if len(argv) > 2 else "zone"
-    assert mode in ("zone", "od", "huygens", "rz", "rzfft"), \
-        "mode must be 'zone', 'od', 'rz [lams]', 'rzfft [lams] [nz]' " \
-        "or 'huygens'"
+    assert mode in ("zone", "od", "huygens", "rz", "rzfft", "pop"), \
+        "mode must be 'zone', 'od', 'rz [lams]', 'rzfft [lams] [nz]', " \
+        "'pop <rung 1|2|3> [lams|all|primary] [samp]' or 'huygens'"
+    # POP ladder rung + grid (see POP_SETTINGS at the top of the file)
+    pop_rung = 3
+    pop_samp = int(POP_SETTINGS["samp"])
+    if mode == "pop":
+        if len(argv) > 3:
+            pop_rung = int(argv[3])
+        assert pop_rung in (0, 1, 2, 3), \
+            "pop rung must be 0 (stock us_stand.dll UDS test), 1, 2 or 3"
+        if len(argv) > 5:
+            pop_samp = int(argv[5])
+        assert pop_samp in (512, 1024, 2048, 4096, 8192), \
+            "pop samp must be a power of 2 between 512 and 8192"
     huygens_lams = ([float(v) for v in argv[3].split(",")]
                     if mode == "huygens" and len(argv) > 3
                     else [0.95])
@@ -313,8 +396,42 @@ def main():
     fold_p = design["fold_P"]
     lam0_um = design["lam0_um"]
     orders = design["orders"]
-    dll_name = ("us_mdl_rings_od.dll" if mode == "od"
-                else "us_mdl_rings.dll")   # zone/rz/rzfft: staircase
+    # surface-2 VARIANT: which model of the MDL sits at surface 2.
+    #   "zone"     staircase DLL, phase only, rays straight  (zone/rz/rzfft)
+    #   "od"       order-decomposition DLL, rays bend by the carrier
+    #   "paraxial" ideal thin lens F = BFD, no DLL      (pop rung 1 only)
+    if mode == "od" or (mode == "pop" and pop_rung == 2):
+        variant = "od"
+    elif mode == "pop" and pop_rung == 1:
+        variant = "paraxial"
+    elif mode == "pop" and pop_rung == 0:
+        variant = "uds_stand"        # OpticStudio's own us_stand.dll, flat
+    else:
+        variant = "zone"
+    dll_name = {"od": "us_mdl_rings_od.dll",
+                "zone": "us_mdl_rings.dll",
+                "paraxial": "(none: Paraxial surface)",
+                "uds_stand": "us_stand.dll"}[variant]
+
+    # ------------------------------------------------------------------
+    # pop wavelength selection (argv[4]): 'all' = every verification
+    # line, 'primary' = the primary only, a comma list in um, or omitted
+    # -> POP_SETTINGS rung default (rungs 1-2: primary only -- they test
+    # the instrument; rung 3: the representative comb lines).
+    # ------------------------------------------------------------------
+    if mode == "pop":
+        sel = argv[4].strip().lower() if len(argv) > 4 else \
+            POP_SETTINGS["rung_default_lams"][pop_rung]
+        if sel == "all":
+            pop_lams = list(design.get("lams_all_um", wavelengths_um))
+        elif sel == "primary":
+            pop_lams = [wavelengths_um[primary_idx - 1]]
+        elif sel == "verify":
+            pop_lams = list(wavelengths_um)
+        else:
+            pop_lams = [float(v) for v in sel.split(",")]
+        wavelengths_um = pop_lams
+        primary_idx = (len(pop_lams) + 1) // 2
 
     # ------------------------------------------------------------------
     # rz / rzfft wavelength selection (argv[3] = 'all', a comma list in
@@ -366,6 +483,16 @@ def main():
               "um) and all z-planes came back BIT-IDENTICAL; do not "
               "trust output unless the dx echo reads ~2 lam F/# AND "
               "the per-plane peaks differ. Use 'rz' instead.")
+    if mode == "pop":
+        print("  POP ladder rung %d (%s surface): grid %d^2, width %.1f "
+              "mm -> %.2f um/sample; %d wavelength(s)"
+              % (pop_rung, variant, pop_samp, POP_SETTINGS["width_mm"],
+                 1000.0 * POP_SETTINGS["width_mm"] / pop_samp,
+                 len(wavelengths_um)))
+        print("  rung meaning: 0 = stock us_stand.dll (does POP pass ANY "
+              "UDS?); 1 = paraxial ideal lens vs analytic Airy "
+              "(instrument check); 2 = od DLL, POP through our UDS "
+              "phase; 3 = zone DLL -- THE test vs rs/verify_rzmap.npz")
     print("  DLL: %s | output -> %s" % (dll_name, out_dir))
     print("  REMINDER: mdl_rings_%d.txt must sit next to the DLLs in "
           "{Documents}\\Zemax\\DLL\\Surfaces\\" % file_no)
@@ -439,19 +566,33 @@ def main():
     surf1.MaterialCell.SetSolveData(surf1.MaterialCell.GetSolveData())
     surf1.Comment = "AZ4562 substrate (model glass)"
 
-    # Surface 2: the MDL relief -- User Defined Surface DLL
+    # Surface 2: the MDL relief -- User Defined Surface DLL (or, for the
+    # POP rung-1 instrument check, an ideal Paraxial lens of the same F)
     surf2 = TheLDE.InsertNewSurfaceAt(2)
-    uds_type = surf2.GetSurfaceTypeSettings(
-        ZOSAPI.Editors.LDE.SurfaceType.UserDefined)
-    uds_type.Filename = dll_name
-    surf2.ChangeType(uds_type)
+    if variant == "paraxial":
+        par_type = surf2.GetSurfaceTypeSettings(
+            ZOSAPI.Editors.LDE.SurfaceType.Paraxial)
+        surf2.ChangeType(par_type)
+    else:
+        uds_type = surf2.GetSurfaceTypeSettings(
+            ZOSAPI.Editors.LDE.SurfaceType.UserDefined)
+        uds_type.Filename = dll_name
+        surf2.ChangeType(uds_type)
     surf2.Thickness = bfd_mm
 
     def set_par(num, value):
         col = getattr(ZOSAPI.Editors.LDE.SurfaceColumn, "Par%d" % num)
         surf2.GetSurfaceCell(col).DoubleValue = float(value)
 
-    if mode != "od":                     # zone + rz: staircase DLL
+    if variant == "paraxial":
+        surf2.Comment = "IDEAL paraxial lens F=BFD (POP rung 1)"
+        set_par(1, bfd_mm)               # Paraxial: Par 1 = focal length
+    elif variant == "uds_stand":
+        # OpticStudio's own standard-surface UDS (UserDefinedSurface3
+        # entry point), left FLAT: does POP propagate through ANY User
+        # Defined Surface in this build?  (rung 0 discriminator)
+        surf2.Comment = "us_stand.dll FLAT (POP rung 0: UDS support test)"
+    elif variant == "zone":              # zone + rz + pop rung 3
         surf2.Comment = "MDL Rings staircase (zone decomposition)"
         # Par 1..4: File #, Height scale, Z sign, Parax f
         set_par(1, file_no)
@@ -503,7 +644,8 @@ def main():
                 "od": "mdl_validation_od.zos",
                 "rz": "mdl_validation_rz.zos",
                 "rzfft": "mdl_validation_rzfft.zos",
-                "huygens": "mdl_validation_huygens.zos"}[mode]
+                "huygens": "mdl_validation_huygens.zos",
+                "pop": "mdl_validation_pop_r%d.zos" % pop_rung}[mode]
     TheSystem.SaveAs(os.path.join(out_dir, zos_name))
     print("saved system -> %s (will be re-saved after the analyses)"
           % zos_name)
@@ -593,7 +735,7 @@ def main():
             cfg = os.path.join(out_dir, "_%s.cfg" % tag)
             st.SaveTo(cfg)
             for code, val in pairs:
-                st.ModifySettings(cfg, code, str(val))
+                st.ModifySettings(cfg, code, zloc(val))   # locale-safe
             st.LoadFrom(cfg)
             return True
         except Exception as exc:
@@ -684,6 +826,631 @@ def main():
               % (samp_ok, "" if out_ok is None
                  else "; output capped at %s" % out_ok))
         return True
+
+    if mode == "pop":
+        # --------------------------------------------------------------
+        # PHYSICAL OPTICS PROPAGATION LADDER (see POP_SETTINGS header).
+        #
+        # WHY POP: every ray-based image analysis (FFT PSF/MTF, Huygens)
+        # builds the image from ray geometry -- exit pupil, reference
+        # sphere, working F/#. The zone DLL bends no ray, so that
+        # geometry is afocal: measured 2026-09-04, the FFT-MTF's own
+        # "Diff. Limit" cut off at 0.14 cyc/mm at 0.70 um, i.e. an
+        # implied working F/# ~ 10,000 against the true 4.97; Huygens
+        # was invariant to wavelength AND sampling (not computing a
+        # focus at all). POP propagates the FIELD between surfaces
+        # (Fresnel / angular spectrum), the native counterpart of the
+        # RS propagation behind rs/ and rz -- the only Zemax engine
+        # that does not need rays to converge.
+        #
+        # WHAT CAN STILL GO WRONG (hence the ladder): POP's pilot beam
+        # is tracked paraxially; a phase-only surface has no paraxial
+        # power, so POP may treat the beam as collimated after surface
+        # 2 (angular-spectrum, FIXED grid) and under-resolve the focus.
+        # Rung 1 (paraxial lens) proves the instrument; rung 2 (od DLL,
+        # rays converge) proves POP's surface transfer through our UDS
+        # OPD; rung 3 (zone DLL) is the real test against RS.
+        #
+        # SETTINGS ROUTE: POP settings go through ModifySettings (ZPL
+        # MODIFYSETTINGS codes, version-proof; applied ONE code at a
+        # time so an unrecognized code cannot void the rest) and are
+        # VERIFIED from the returned DataGrid (nx, dx) -- never assumed.
+        # Rung 1 additionally runs a zero-length propagation (end =
+        # start surface) to confirm the LAUNCH beam: a flat top-hat of
+        # radius EPD/2 on the requested grid.
+        #
+        # Output: zemax/pop_r<rung>.npz (per wavelength: I_<nm> = 512^2
+        # crop around the peak, r_um + prof_<nm> azimuthal profile,
+        # metrics), fig_zemax_pop_r<rung>_<nm>.png (radial PSF vs RS /
+        # Airy, MTF vs rs/verify_mtf.npz), mdl_validation_pop_r<rung>.zos
+        # (run with 'gui' to leave the POP window open and saved in the
+        # .zos so colleagues can re-run it by clicking).
+        # --------------------------------------------------------------
+        import time as _time
+        import numpy as np
+        from scipy.special import j0 as _j0
+        import math as _math
+
+        width_mm = float(POP_SETTINGS["width_mm"])
+        start_surf = int(POP_SETTINGS["start_surface"])
+        end_surf = int(TheLDE.NumberOfSurfaces - 1)      # IMAGE
+        samp_idx = int(round(_math.log2(pop_samp))) - 4  # 32 -> 1
+        na_par = epd_mm / (2.0 * bfd_mm)                 # paraxial NA
+        F_um = bfd_mm * 1000.0
+        npz_path = os.path.join(out_dir, "pop_r%d.npz" % pop_rung)
+        store = {"rung": pop_rung, "variant": variant, "samp": pop_samp,
+                 "width_mm": width_mm, "lam_um": np.array(wavelengths_um)}
+
+        # --- substrate medium -> AIR for POP ---------------------------
+        # MEASURED 2026-09-04: with the beam launched in the substrate
+        # (surface 1, MaterialModel solve nd 1.6274) POP built a pilot
+        # beam with Rayleigh = 0 and Size = NaN at the start surface for
+        # every real beam type, i.e. z_R = pi w^2 n / lam with n = 0:
+        # POP does not evaluate the Material-Model solve (File/DLL beams,
+        # which bypass it, reported z_R = 4188.8 mm = n 1 exactly). The
+        # substrate is a plane-parallel plate at normal incidence -- no
+        # effect on a collimated launch -- and neither DLL uses n1 (zone
+        # OPD = n2 z; od bends with l = 0), so POP mode runs it in air.
+        try:
+            surf1.MaterialCell.SetSolveData(
+                surf1.MaterialCell.CreateSolveType(
+                    ZOSAPI.Editors.SolveType.Fixed))
+            surf1.Material = ""
+            surf1.Comment = "substrate front (AIR for POP: model-glass " \
+                            "solve not evaluated by POP)"
+            print("  surface 1 medium set to AIR for POP (model-glass "
+                  "solve gives POP n=0 -> NaN pilot beam)")
+        except Exception as exc:
+            print("  (could not set surface 1 to air: %s)" % exc)
+
+        # --- HARD circular aperture on the STOP (surface 1) ------------
+        # POP clips the beam at HARD apertures, not at the automatic
+        # semi-diameter. With the aperture in place the illumination
+        # inside the pupil is set by the aperture, which makes a wide
+        # Gaussian launch (waist 5 R -> <= 8 % roll-off at the edge) a
+        # near-uniform disc: the fallback when the top-hat beam type
+        # will not build a pilot beam (measured 2026-09-04: NaN pilot).
+        try:
+            apd = surf1.ApertureData
+            aset = apd.CreateApertureTypeSettings(
+                ZOSAPI.Editors.LDE.SurfaceApertureTypes.CircularAperture)
+            aset._S_CircularAperture.MinimumRadius = 0.0
+            aset._S_CircularAperture.MaximumRadius = epd_mm / 2.0
+            apd.ChangeApertureTypeSettings(aset)
+            print("  hard circular aperture R=%.3f mm set on the STOP "
+                  "(surface 1) for POP" % (epd_mm / 2.0))
+        except Exception as exc:
+            print("  (could not set a hard aperture on surface 1: %s -- "
+                  "a Gaussian launch will NOT be clipped to the pupil)"
+                  % exc)
+
+        # --- surface-2 Physical Optics flags (best effort, echoed) -----
+        try:
+            pod = surf2.PhysicalOpticsData
+            # MEASURED 2026-09-04: for a User Defined Surface OpticStudio
+            # auto-sets UseRaysToPropagateToNextSurface = True (it deems
+            # the UDS unsupported for diffraction transfer and hands the
+            # beam over by RAYS, which also throws away the diffraction
+            # from surface 2 to the image -- useless for us -- and, as
+            # measured, returned no data at all). Force it OFF so POP
+            # must apply the surface through its OPD (the batch-trace-
+            # validated +n2*z law), and echo the flags actually in force.
+            try:
+                pod.UseRaysToPropagateToNextSurface = False
+            except Exception as exc:
+                print("  (could not clear UseRaysToPropagate on surface "
+                      "2: %s)" % exc)
+            if POP_SETTINGS["angular_spectrum"] is not None:
+                pod.UseAngularSpectrumPropagator = \
+                    bool(POP_SETTINGS["angular_spectrum"])
+            print("  surface 2 Physical Optics: UseAngularSpectrum=%s "
+                  "UseRaysToPropagate=%s ResampleAfterRefraction=%s"
+                  % (getattr(pod, "UseAngularSpectrumPropagator", "?"),
+                     getattr(pod, "UseRaysToPropagateToNextSurface", "?"),
+                     getattr(pod, "ResampleAfterRefraction", "?")))
+            for sidx in (1,):
+                try:
+                    pod1 = TheLDE.GetSurfaceAt(sidx).PhysicalOpticsData
+                    pod1.UseRaysToPropagateToNextSurface = False
+                except Exception:
+                    pass
+        except Exception as exc:
+            print("  (surface Physical Optics flags not reachable: %s)"
+                  % exc)
+
+        # POP_BEAMTYPE table, MEASURED 2026-09-04 (0-based dropdown
+        # order): 4 = File and 5 = DLL returned POP's defaults with an
+        # EMPTY beam (32x32, waist 1, sum 0); 3 = Top Hat built a NaN
+        # pilot beam with our parameters; 2 = Gaussian Size+Angle no
+        # data. Rung 1 therefore CALIBRATES the launch: candidates are
+        # (beam code, auto-sampling flag, waist) -- the top hat two ways,
+        # then the clipped wide Gaussian (code 0 = Gaussian Waist, the
+        # default type, waist 5 R behind the hard aperture). The first
+        # that yields a flat disc of radius EPD/2 is kept for the ladder.
+        R_mm = epd_mm / 2.0
+        POP_LAUNCH_CANDIDATES = (
+            {"code": 3, "auto": 0, "waist": R_mm,       "name": "top hat"},
+            {"code": 3, "auto": 1, "waist": R_mm,       "name": "top hat, auto"},
+            {"code": 0, "auto": 0, "waist": 5.0 * R_mm, "name": "Gaussian 5R + aperture"},
+            {"code": 0, "auto": 1, "waist": 5.0 * R_mm, "name": "Gaussian 5R + aperture, auto"},
+        )
+        pop_state = {"launch": None, "start": start_surf}
+
+        def pop_configure(an, wi, end_surface, launch, samp, echo=False):
+            """Apply the POP settings for wavelength number wi. Each
+            MODIFYSETTINGS code is applied in its own try so one
+            unknown code cannot void the others; returns the list of
+            codes that FAILED (empty = all accepted)."""
+            failed = []
+            s_idx = int(round(_math.log2(samp))) - 4          # 32 -> 1
+            try:
+                st = an.GetSettings()
+                cfg = os.path.join(out_dir, "_pop_w%d.cfg" % wi)
+                st.SaveTo(cfg)
+                pairs = [("POP_START", pop_state["start"]),
+                         ("POP_END", end_surface),
+                         ("POP_WAVE", wi),
+                         ("POP_FIELD", 1),
+                         ("POP_BEAMTYPE", int(launch["code"])),
+                         ("POP_PARAM1", float(launch["waist"])),  # X
+                         ("POP_PARAM2", float(launch["waist"])),  # Y
+                         ("POP_SAMPX", s_idx),
+                         ("POP_SAMPY", s_idx),
+                         ("POP_WIDEX", width_mm),
+                         ("POP_WIDEY", width_mm),
+                         ("POP_AUTO", int(launch["auto"])),
+                         ("POP_DATA", 0)]              # irradiance
+                applied = []
+                for code, val in pairs:
+                    try:
+                        sval = zloc(val)
+                        st.ModifySettings(cfg, code, sval)
+                        applied.append("%s=%s" % (code, sval))
+                    except Exception as exc:
+                        failed.append("%s(%s)" % (code, exc))
+                st.LoadFrom(cfg)
+                if echo:
+                    print("  POP settings sent (locale-formatted): %s"
+                          % ", ".join(applied))
+            except Exception as exc:
+                failed.append("route(%s)" % exc)
+            # typed reinforcement for the two unambiguous fields
+            try:
+                ts = typed_settings(an, "StartSurface")
+                if hasattr(ts, "StartSurface"):
+                    ts.StartSurface = pop_state["start"]
+                    ts.EndSurface = end_surface
+                if hasattr(ts, "Wavelength"):
+                    ts.Wavelength.SetWavelengthNumber(wi)
+            except Exception:
+                pass
+            return failed
+
+        def radial_profile(arr, dx_um, r_max_um):
+            """Azimuthal average around the peak pixel: (r_um, prof,
+            peak_xy_um relative to grid center)."""
+            ny, nx = arr.shape
+            iy, ix = np.unravel_index(int(np.argmax(arr)), arr.shape)
+            half = int(np.ceil(r_max_um / dx_um)) + 2
+            y0, y1 = max(iy - half, 0), min(iy + half + 1, ny)
+            x0, x1 = max(ix - half, 0), min(ix + half + 1, nx)
+            sub = arr[y0:y1, x0:x1]
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            rr = np.hypot((xx - ix) * dx_um, (yy - iy) * dx_um)
+            k = np.floor(rr / dx_um).astype(int)
+            nb = int(np.ceil(r_max_um / dx_um)) + 1
+            sel = k < nb
+            s = np.bincount(k[sel], weights=sub[sel], minlength=nb)
+            c = np.bincount(k[sel], minlength=nb)
+            prof = np.where(c > 0, s / np.maximum(c, 1), 0.0)
+            r_um = (np.arange(nb) + 0.5) * dx_um
+            r_um[0] = 0.0
+            pk_xy = ((ix - nx / 2.0) * dx_um, (iy - ny / 2.0) * dx_um)
+            return r_um, prof, pk_xy
+
+        def fwhm_of(r, I):
+            if I.size < 3 or I.max() <= 0:
+                return float("nan")
+            half = 0.5 * I[0] if I[0] >= I.max() else 0.5 * I.max()
+            idx = np.where(I < half)[0]
+            if idx.size == 0:
+                return float("nan")
+            i1 = idx[0]
+            if i1 == 0:
+                return float("nan")
+            # linear interpolation of the half crossing
+            r_half = r[i1 - 1] + (r[i1] - r[i1 - 1]) * \
+                (I[i1 - 1] - half) / max(I[i1 - 1] - I[i1], 1e-30)
+            return float(2.0 * r_half)
+
+        def hankel_mtf(I, r, f_um):
+            w = I * r
+            dc = 2 * np.pi * np.trapezoid(w, r)
+            if dc <= 0:
+                return np.zeros(f_um.size)
+            out = np.array([2 * np.pi * np.trapezoid(
+                w * _j0(2 * np.pi * ff * r), r) for ff in f_um])
+            return np.abs(out) / dc
+
+        def run_pop(wi, end_surface, tag, launch=None, samp=None,
+                    echo=False, quiet=False):
+            """One POP propagation. Returns (arr, dx_um, dy_um, desc) or
+            None on failure. Verifies the returned grid against the
+            request and echoes the discrepancy. If POP returns no data
+            at the requested grid, retries at half the grid (memory /
+            license sampling cap) down to 1024 and says so."""
+            if launch is None:
+                launch = pop_state["launch"]
+            if samp is None:
+                samp = pop_samp
+            idm = ZOSAPI.Analysis.AnalysisIDM.PhysicalOpticsPropagation
+            an = TheSystem.Analyses.New_Analysis(idm)
+            failed = pop_configure(an, wi, end_surface, launch, samp,
+                                   echo=echo)
+            if failed:
+                print("  POP settings NOT accepted: %s" % ", ".join(failed))
+            t0 = _time.time()
+            try:
+                an.ApplyAndWaitForCompletion()
+            except Exception as exc:
+                print("  POP %s FAILED to run: %s" % (tag, exc))
+                if not GUI:
+                    an.Close()
+                return None
+            grids = grab_all_grids(an)
+            if grids is None:
+                # POP failed: ask the analysis for its own text report,
+                # which carries OpticStudio's error line when there is one
+                try:
+                    txt = os.path.join(out_dir, "_pop_fail_w%d.txt" % wi)
+                    an.GetResults().GetTextFile(txt)
+                    lines = [ln.strip() for ln in
+                             open(txt, "r", errors="replace").read()
+                             .splitlines() if ln.strip()]
+                    if lines:
+                        print("  POP text report (first lines): "
+                              + " | ".join(lines[:12]))
+                    else:
+                        print("  POP text report: EMPTY")
+                except Exception as exc:
+                    print("  (no POP text report: %s)" % exc)
+            if not GUI:
+                an.Close()
+            if grids is None:
+                if samp > 1024:
+                    print("  POP %s: no data at %d^2 -- retrying at %d^2"
+                          % (tag, samp, samp // 2))
+                    return run_pop(wi, end_surface, tag, launch,
+                                   samp // 2, echo=False, quiet=quiet)
+                if not quiet:
+                    print("  POP %s: no data returned" % tag)
+                return None
+            arr, (dx_mm, dy_mm, minx, miny), desc = grids[0]
+            dx_um, dy_um = 1000.0 * dx_mm, 1000.0 * dy_mm
+            ny, nx = arr.shape
+            req_dx = 1000.0 * width_mm / samp
+            if not quiet:
+                print("  POP %s: grid %dx%d, dx=%.3f um (requested %d^2 "
+                      "at %.3f um), extent %.2f x %.2f mm, sum=%.4g  "
+                      "[%s]  (%.1fs)"
+                      % (tag, nx, ny, dx_um, samp, req_dx, nx * dx_mm,
+                         ny * dy_mm, np.nansum(arr), desc,
+                         _time.time() - t0))
+                if nx != samp:
+                    print("  NOTE: returned grid %d != requested %d -- "
+                          "POP resampled (auto) or the DataGrid is the "
+                          "display decimation (cf. rzfft 2026-08-31); "
+                          "trust dx as echoed, not as requested"
+                          % (nx, samp))
+            return arr, dx_um, dy_um, desc
+
+        def launch_metrics(arr0, dx0, dy0):
+            """Flat-disc test of a launch beam: (plateau, outside level,
+            in-disc ripple, edge radius mm)."""
+            ny0, nx0 = arr0.shape
+            yy, xx = np.mgrid[0:ny0, 0:nx0]
+            rr = np.hypot((xx - nx0 / 2.0) * dx0,
+                          (yy - ny0 / 2.0) * dy0) / 1000.0  # mm
+            inside = rr <= 0.98 * epd_mm / 2.0
+            outside = rr >= 1.02 * epd_mm / 2.0
+            lvl_in = float(np.nanmedian(arr0[inside])) if inside.any() \
+                else float("nan")
+            lvl_out = float(np.nanmedian(arr0[outside])) if outside.any() \
+                else float("nan")
+            flat = float(np.nanstd(arr0[inside]) / max(lvl_in, 1e-30)) \
+                if inside.any() and lvl_in > 0 else float("nan")
+            cen = arr0[ny0 // 2, :]
+            xs = (np.arange(nx0) - nx0 / 2.0) * dx0 / 1000.0
+            pos = xs >= 0
+            half_idx = np.where(cen[pos] < 0.5 * lvl_in)[0] \
+                if np.isfinite(lvl_in) and lvl_in > 0 else np.array([])
+            r_edge = float(xs[pos][half_idx[0]]) if half_idx.size \
+                else float("nan")
+            return lvl_in, lvl_out, flat, r_edge
+
+        # --- LAUNCH-BEAM CALIBRATION (every rung): find the beam-type
+        # code that produces a flat disc of radius EPD/2. Propagated to
+        # the NEXT surface (start+1: 1.1 mm of substrate -- a top hat is
+        # unchanged over that distance), because a zero-length
+        # propagation (end = start) returns nothing. Done at 1024^2 for
+        # speed; the chosen code is then used at the requested grid.
+        chosen = None
+        for start_try in (start_surf, start_surf + 1):
+          if chosen is not None:
+              break
+          pop_state["start"] = start_try
+          print("  launch calibration with POP start surface %d (%s)"
+                % (start_try, "substrate front" if start_try == start_surf
+                   else "the MDL/lens surface itself"))
+          for li, launch in enumerate(POP_LAUNCH_CANDIDATES):
+            tagl = "launch %s (code %d, auto %d, waist %.2f mm)" % (
+                launch["name"], launch["code"], launch["auto"],
+                launch["waist"])
+            res0 = run_pop(1, start_try + 1, tagl, launch=launch,
+                           samp=1024, echo=(li == 0))
+            if res0 is None:
+                print("  %s: no data (NaN pilot / invalid)" % launch["name"])
+                continue
+            arr0, dx0, dy0, desc0 = res0
+            lvl_in, lvl_out, flat, r_edge = launch_metrics(arr0, dx0, dy0)
+            print("  %s: plateau %.4g, outside %.4g, in-disc ripple "
+                  "%.2e, edge radius %.3f mm (want %.3f)"
+                  % (launch["name"], lvl_in, lvl_out, flat, r_edge,
+                     epd_mm / 2.0))
+            ok_edge = np.isfinite(r_edge) and \
+                abs(r_edge - epd_mm / 2.0) < 0.05 * epd_mm
+            ok_flat = np.isfinite(flat) and flat < 0.10
+            if start_try != start_surf:
+                # launched AT the lens: the next surface is the image,
+                # so the field is the focus, not a disc -- accept finite
+                # positive data and let the rung-1 Airy verdict judge
+                # whether the lens phase was applied at launch.
+                fin = np.isfinite(arr0).all() and np.nansum(arr0) > 0
+                print("  (launch at the lens: disc test not applicable; "
+                      "data %s)" % ("finite, accepted" if fin else
+                                     "invalid"))
+                ok_edge = ok_flat = fin
+                lvl_in = 1.0 if fin else float("nan")
+                r_edge = epd_mm / 2.0
+                flat = 0.0
+            if ok_edge and ok_flat and np.isfinite(lvl_in) and lvl_in > 0:
+                chosen = launch
+                ny0, nx0 = arr0.shape
+                store["launch_I"] = arr0[::max(nx0 // 512, 1),
+                                         ::max(nx0 // 512, 1)]
+                store["launch_dx_um"] = dx0 * max(nx0 // 512, 1)
+                store["launch_code"] = launch["code"]
+                store["launch_auto"] = launch["auto"]
+                store["launch_waist_mm"] = launch["waist"]
+                print("  -> '%s' gives a flat disc of radius %.3f mm "
+                      "(ripple %.1f%%); using it for the ladder"
+                      % (launch["name"], r_edge, 100 * flat))
+                break
+        if chosen is None:
+            if pop_rung == 0:
+                print("  RUNG 0 verdict: POP ABORTS even through "
+                      "OpticStudio's own us_stand.dll -> User Defined "
+                      "Surfaces are NOT propagated by POP in this build "
+                      "(the 'Use Rays To Propagate' flag is forced on and "
+                      "the ray hand-off fails). Porting our DLLs will not "
+                      "help; the POP model of the MDL must use a "
+                      "POP-native surface (Grid Phase / Grid Sag of the "
+                      "ring profile, or Binary 2 carrier + residual).")
+            elif pop_rung in (2, 3):
+                print("  (rungs 2/3 launch through our UDS: run 'pop 0' "
+                      "to learn whether ANY UDS passes POP here)")
+            print("  NO candidate gave a flat EPD/2 disc -- the ladder "
+                  "cannot proceed. Read the echo above: if every "
+                  "candidate returned no data the failure is upstream "
+                  "of the beam type (settings route, sampling cap, or "
+                  "POP unavailable headless); if a disc appeared with "
+                  "the wrong radius, POP_PARAM1/2 are not the top-hat "
+                  "half-widths in this build.")
+            np.savez_compressed(npz_path, **store)
+            TheSystem.SaveAs(os.path.join(out_dir, zos_name))
+            del zos
+            return
+        pop_state["launch"] = chosen
+
+        # --- RS references (rung 3) -------------------------------------
+        rs_rz = rs_mtf = None
+        if "run_dir" in design:
+            for cand in (os.path.join(design["run_dir"], "rs",
+                                      "verify_rzmap.npz"),
+                         os.path.join(design["run_dir"],
+                                      "verify_rzmap.npz")):
+                if os.path.exists(cand):
+                    rs_rz = np.load(cand)
+                    break
+            cand = os.path.join(design["run_dir"], "rs", "verify_mtf.npz")
+            if os.path.exists(cand):
+                rs_mtf = np.load(cand)
+
+        r_cmp = float(POP_SETTINGS["r_max_um"])
+        print("  lam(um)  peak(x,y)um   FWHM_pop  FWHM_ref   ratio   "
+              "P(3FWHM)/P(grid)   corr_vs_ref")
+        results = []
+        for wi, lam in enumerate(wavelengths_um, start=1):
+            key = int(round(lam * 1000))
+            res = run_pop(wi, end_surf, "lam=%.2f um" % lam)
+            if res is None:
+                continue
+            arr, dx_um, dy_um, desc = res
+            r_um, prof, pk_xy = radial_profile(arr, dx_um,
+                                               max(r_cmp, 30.0) + 5.0)
+            fwhm_pop = fwhm_of(r_um, prof)
+            # analytic references
+            fwhm_airy = 1.029 * lam / (2.0 * na_par)
+            # encircled power within 3 x FWHM diameter vs power on grid
+            p_grid = float(arr.sum())
+            if np.isfinite(fwhm_pop):
+                sel = r_um <= 1.5 * fwhm_pop
+                p_core = float(2 * np.pi * np.trapezoid(
+                    prof[sel] * r_um[sel], r_um[sel]))
+                eff_grid = p_core / max(p_grid * dx_um * dy_um, 1e-30)
+            else:
+                eff_grid = float("nan")
+            # reference profile: RS focal slice (rung 3) or Airy
+            corr = float("nan")
+            fwhm_ref = fwhm_airy
+            ref_r = ref_I = None
+            if pop_rung == 3 and rs_rz is not None and \
+                    "I_%d" % key in rs_rz.files:
+                zg = rs_rz["zgrid"]
+                izF = int(np.argmin(np.abs(zg - F_um)))
+                ref_r = rs_rz["r0grid"]
+                ref_I = rs_rz["I_%d" % key][izF, :]
+                fwhm_ref = fwhm_of(ref_r, ref_I)
+                pi_ = np.interp(ref_r, r_um, prof)
+                if pi_.max() > 0 and ref_I.max() > 0:
+                    corr = float(np.corrcoef(pi_ / pi_.max(),
+                                             ref_I / ref_I.max())[0, 1])
+            else:
+                # Airy reference on the POP radii
+                x = 2 * np.pi * na_par * np.maximum(r_um, 1e-9) / lam
+                from scipy.special import j1 as _j1
+                ref_r = r_um
+                ref_I = (2 * _j1(x) / x) ** 2
+                pi_ = prof / max(prof.max(), 1e-30)
+                corr = float(np.corrcoef(pi_, ref_I / ref_I.max())[0, 1])
+            ratio = fwhm_pop / fwhm_ref if (np.isfinite(fwhm_pop) and
+                                            np.isfinite(fwhm_ref) and
+                                            fwhm_ref > 0) else float("nan")
+            print("  %.3f    (%+.1f,%+.1f)    %6.2f    %6.2f    %5.3f     "
+                  "%6.3f            %.4f"
+                  % (lam, pk_xy[0], pk_xy[1], fwhm_pop, fwhm_ref, ratio,
+                     eff_grid, corr))
+            # MTF from the POP profile on the RS frequency grid
+            mtf_pop = None
+            if rs_mtf is not None:
+                f_um = rs_mtf["f_lppmm"] / 1000.0
+                r_w = float(rs_mtf["r_max_um"]) if "r_max_um" in rs_mtf.files \
+                    else 30.0
+                selm = r_um <= r_w
+                mtf_pop = hankel_mtf(prof[selm], r_um[selm], f_um)
+                store["MTF_%d" % key] = mtf_pop
+            # store
+            ny, nx = arr.shape
+            iy, ix = np.unravel_index(int(np.argmax(arr)), arr.shape)
+            k = 256
+            y0, x0 = max(iy - k, 0), max(ix - k, 0)
+            store["I_%d" % key] = arr[y0:y0 + 2 * k, x0:x0 + 2 * k]
+            store["dx_um_%d" % key] = dx_um
+            store["r_um_%d" % key] = r_um
+            store["prof_%d" % key] = prof
+            results.append((lam, fwhm_pop, fwhm_ref, eff_grid, corr))
+            np.savez_compressed(npz_path, **store)
+
+            # --- figure: radial PSF + MTF -----------------------------
+            try:
+                import matplotlib
+                matplotlib.use("Agg")
+                import matplotlib.pyplot as plt
+                fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.2))
+                a1.plot(r_um, prof / max(prof.max(), 1e-30), color="k",
+                        lw=2, label="POP rung %d (%s)" % (pop_rung,
+                                                          variant))
+                if ref_r is not None:
+                    a1.plot(ref_r, ref_I / max(ref_I.max(), 1e-30),
+                            color="#e6550d", lw=1.6, ls="--",
+                            label=("RS focal slice" if pop_rung == 3
+                                   and rs_rz is not None else
+                                   "Airy (analytic)"))
+                a1.set_xlim(0, r_cmp)
+                a1.set_xlabel("r (um)")
+                a1.set_ylabel("I / peak")
+                a1.set_title("%d nm: radial PSF at z=F  FWHM %.2f um "
+                             "(ref %.2f)" % (key, fwhm_pop, fwhm_ref),
+                             fontsize=9)
+                a1.legend(fontsize=8)
+                a1.grid(alpha=0.25)
+                if mtf_pop is not None:
+                    fl = rs_mtf["f_lppmm"]
+                    a2.plot(fl, mtf_pop, color="k", lw=2,
+                            label="POP")
+                    if "MTF_%d" % key in rs_mtf.files:
+                        a2.plot(fl, rs_mtf["MTF_%d" % key],
+                                color="#e6550d", lw=1.6, ls="--",
+                                label="RS design")
+                    if "MTFdl_%d" % key in rs_mtf.files:
+                        a2.plot(fl, rs_mtf["MTFdl_%d" % key],
+                                color="gray", lw=1.2, ls=":",
+                                label="diffraction limit")
+                    a2.set_xlim(0, fl[-1])
+                    a2.set_ylim(0, 1)
+                    a2.set_xlabel("spatial frequency (lp/mm)")
+                    a2.set_ylabel("MTF")
+                    a2.set_title("MTF from the POP focal irradiance "
+                                 "(same Hankel/window as rs)", fontsize=9)
+                    a2.legend(fontsize=8)
+                    a2.grid(alpha=0.25)
+                else:
+                    a2.text(0.5, 0.5, "rs/verify_mtf.npz not found\n"
+                            "(run 02_validation_rs\\mtf_verify.py)",
+                            ha="center", va="center",
+                            transform=a2.transAxes)
+                fig.suptitle("POP ladder rung %d -- %s surface, grid %d^2 "
+                             "(%.2f um/sample)" % (pop_rung, variant,
+                                                    pop_samp, dx_um),
+                             fontsize=10)
+                fig.tight_layout()
+                fig.savefig(os.path.join(
+                    out_dir, "fig_zemax_pop_r%d_%d.png" % (pop_rung, key)),
+                    dpi=140)
+                plt.close(fig)
+            except Exception as exc:
+                print("  (figure failed: %s)" % exc)
+
+        print("saved %s" % npz_path)
+        # --- verdict per rung ------------------------------------------
+        if results:
+            ratios = [r[1] / r[2] for r in results
+                      if np.isfinite(r[1]) and np.isfinite(r[2])
+                      and r[2] > 0]
+            corrs = [r[4] for r in results if np.isfinite(r[4])]
+            if pop_rung == 0:
+                print("  RUNG 0 verdict: POP propagated THROUGH a stock "
+                      "User Defined Surface (us_stand.dll) -> UDS is "
+                      "supported by POP in this build; our DLLs must be "
+                      "ported to the UserDefinedSurface3 entry point "
+                      "(the v1 entry point aborts POP).")
+            elif pop_rung == 1:
+                print("  RUNG 1 verdict: FWHM/Airy ratio %s, corr vs "
+                      "Airy %s -> instrument is %s"
+                      % (", ".join("%.3f" % x for x in ratios),
+                         ", ".join("%.4f" % x for x in corrs),
+                         "VALID (expect ratio ~1.00, corr > 0.99)"
+                         if ratios and max(abs(x - 1) for x in ratios) < 0.1
+                         else "NOT yet validated -- check the launch "
+                              "beam, grid and settings echo above"))
+            elif pop_rung == 2:
+                print("  RUNG 2 verdict: carrier PSF FWHM/Airy %s -> POP "
+                      "%s our UDS phase (od: expect near-Airy; no halo "
+                      "because the od DLL carries one order)"
+                      % (", ".join("%.3f" % x for x in ratios),
+                         "TRANSFERS" if ratios and
+                         max(abs(x - 1) for x in ratios) < 0.15
+                         else "does NOT yet reproduce"))
+            else:
+                print("  RUNG 3 verdict: FWHM POP/RS %s, corr vs RS focal "
+                      "slice %s -> %s"
+                      % (", ".join("%.3f" % x for x in ratios),
+                         ", ".join("%.4f" % x for x in corrs),
+                         "POP reproduces the RS focal PSF on the zone "
+                         "surface" if corrs and min(corrs) > 0.98 else
+                         "MISMATCH: suspect the pilot-beam regime "
+                         "(collimated after a phase-only surface) or "
+                         "the fixed-grid resolution -- try samp 8192, "
+                         "POP_SETTINGS['angular_spectrum'], or the od+"
+                         "residual hybrid"))
+        TheSystem.SaveAs(os.path.join(out_dir, zos_name))
+        print("re-saved system -> %s%s" % (
+            zos_name, "  (POP window left open in the GUI and saved with "
+                      "the file)" if GUI else
+            "  (run with 'gui' to keep the POP window open for "
+            "colleagues)"))
+        del zos
+        return
 
     if mode == "od":
         # --------------------------------------------------------------
@@ -1173,6 +1940,9 @@ def main():
           "the intensity tiles from the Zemax-traced field:")
     print("  python %s %s od" % (os.path.basename(sys.argv[0]), arg))
     print("  python %s %s rz   (all lines, seconds per wavelength)"
+          % (os.path.basename(sys.argv[0]), arg))
+    print("  python %s %s pop 1   (POP ladder: 1 = instrument check, "
+          "2 = od carrier, 3 = zone vs RS)"
           % (os.path.basename(sys.argv[0]), arg))
     del zos
 
