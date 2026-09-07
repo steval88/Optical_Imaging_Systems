@@ -170,13 +170,74 @@ def zloc(v):
 
 POP_SETTINGS = {
     "samp": 4096,
-    "width_mm": 12.0,
+    # Lens-plane array width. A POP grid obeys the DFT relation
+    #   focal extent = lam F / dx_lens,  focal pitch = lam F / (N dx_lens)
+    # (measured 2026-09-04: auto width 580.8 mm / 4096 -> dx 141.8 um at
+    # the lens -> 0.066 um at the focus, exactly lam F / (N dx)). 48 mm
+    # at 4096 gives dx 11.7 um at the lens (874 samples across the
+    # 10.24 mm pupil, 4 per rim fold) and 0.64 um / 2.6 mm at the focus
+    # (600 nm): the balance the fold-scale residual needs. Honoured
+    # only if the launch width or the forced re-sample is accepted --
+    # the grid echo is the authority.
+    "width_mm": 48.0,
+    # Forced re-sample after refraction at the lens plane. MEASURED
+    # 2026-09-07: with POP_AUTO sent before POP_WIDEX the launch width
+    # IS honoured (48.00 mm echoed), so the launch grid already carries
+    # the lens plane and no re-sample is needed; a re-sample whose
+    # sampling enum is not accepted silently replaces the beam by 32^2.
+    # Default OFF; True re-samples to width_mm / samp when the enum is
+    # settable (echoed) and stays off otherwise.
+    "resample_lens_plane": False,
+    # Medium BEHIND the Paraxial lens (zero thickness) in the hybrid, so
+    # the residual UDS sits between this glass and air. MEASURED
+    # 2026-09-07: POP takes a UDS phase from the PHYSICAL optical path
+    # of the traced ray -- with air on both sides the displaced
+    # intercept adds no path and the residual was silently zero (point
+    # mode returned an exact Airy pattern, FWHM/Airy 1.002-1.006). With
+    # a real index step the DLL (Par 7 = 1) displaces by OPL/(n1-n2) and
+    # the physical path difference IS the residual. Any catalog glass
+    # works (n1 is read from OpticStudio); the model-glass solve is
+    # NOT evaluated by POP (NaN pilot, 2026-09-04), hence a catalog.
+    "phase_glass": "N-BK7",
+    # True: list the ZOS-API member names of the surface Physical Optics
+    # data and of the typed POP settings (how the real property names
+    # were learned on 2026-09-07); off by default -- noise once known
+    "echo_members": False,
+    "avg_cell": "grid",          # hybrid Par 6: "grid" = measured POP
+                                 # pitch at the residual surface, a float
+                                 # [mm] to force, 0 = point sample
     "start_surface": 1,          # beam defined at the substrate front
     "angular_spectrum": None,    # None / True / False (surface 2 flag)
     "beam": "tophat",            # uniform plane-wave illumination
     "r_max_um": 20.0,            # radial comparison window (= rs tiles)
     "rung_default_lams": {0: "primary", 1: "primary", 2: "primary",
-                          3: "verify"},
+                          3: "verify", 4: "verify"},
+}
+
+
+# Huygens PSF / MTF on the HYBRID system (mode 'huy', 2026-09-07).
+# MEASURED on POP the same day (DLL debug log): POP evaluates a User
+# Defined Surface with ~70 rays per wavelength over the whole array
+# and interpolates -- it cannot carry the fold-scale residual. The
+# Huygens PSF sums one wavelet PER PUPIL RAY with that ray's traced
+# OPD and direction (the rz-validated per-ray accounting), so with the
+# Paraxial lens bending the rays and the residual UDS cell-averaged on
+# the pupil pitch it is the ray engine that can host the MDL.
+HUY_SETTINGS = {
+    # MEASURED 2026-09-07: 1024^2 pupil x 256^2 image took 450-520 s per
+    # Huygens PSF and ~200 s per Huygens MTF (cost ~ pupil^2 x image^2);
+    # with UsePolarization=True every PSF grid came back ALL ZERO (sum 0,
+    # empty description) although the settings were accepted. Defaults
+    # now: 512^2 pupil (20 um ray pitch -- the cell mean holds to corr
+    # 1.0000 even at 142 um), 128^2 image at 0.4 um (+-26 um), and
+    # polarization OFF (retried automatically the other way if a grid
+    # is all zero). Without polarization Zemax ignores rel_surf_tran,
+    # so the reference for that case is the PHASE-ONLY cell mean.
+    "pupil_samp": 512,       # rays across the pupil: pitch EPD/N -> Avg cell
+    "image_samp": 128,       # image grid (per side): 128 x 0.4 um = +-26 um
+    "image_delta_um": 0.4,   # image pitch [um] (Huygens 'Image Delta')
+    "max_freq_lpmm": 600.0,  # Huygens MTF frequency range [cycles/mm]
+    "use_polarization": False,  # include surface transmission (rel_surf_tran)
 }
 
 
@@ -283,6 +344,30 @@ def rs_tiles(U, rho, delta, lam, zgrid, r0grid):
     return out
 
 
+SCRIPT_VERSION = "2026-09-07.15"     # bumped at every delivery; echoed
+                                     # in the configuration section so a
+                                     # stale copy is visible at a glance
+_SECTION = [0]
+
+
+def section(title, sub=None):
+    """Numbered stage banner so the (deliberately verbose) log reads as
+    a sequence of steps: a blank line, a rule, '<n>. TITLE', optional
+    one-line purpose. Sub-steps use subsection()."""
+    _SECTION[0] += 1
+    print("")
+    print("=" * 78)
+    print("%d. %s" % (_SECTION[0], title.upper()))
+    if sub:
+        print("   %s" % sub)
+    print("=" * 78)
+
+
+def subsection(title):
+    print("")
+    print("--- %s " % title + "-" * max(0, 74 - len(title)))
+
+
 def main():
     # 'gui' anywhere on the command line switches the connection to
     # INTERACTIVE EXTENSION mode: the script drives the OPEN
@@ -295,21 +380,42 @@ def main():
     GUI = len(argv) != len(sys.argv)
     arg = argv[1] if len(argv) > 1 else "s3"
     mode = argv[2] if len(argv) > 2 else "zone"
-    assert mode in ("zone", "od", "huygens", "rz", "rzfft", "pop"), \
+    assert mode in ("zone", "od", "huygens", "rz", "rzfft", "pop", "huy"), \
         "mode must be 'zone', 'od', 'rz [lams]', 'rzfft [lams] [nz]', " \
-        "'pop <rung 1|2|3> [lams|all|primary] [samp]' or 'huygens'"
+        "'pop <rung 0..4> [lams|all|primary|verify] [samp] [point]', " \
+        "'huy [lams|all|primary|verify] [pupil_samp]' or 'huygens'"
+    huy_samp = int(HUY_SETTINGS["pupil_samp"])
+    if mode == "huy":
+        if len(argv) > 4 and argv[4].strip().isdigit():
+            huy_samp = int(argv[4])
+        assert huy_samp in (256, 512, 1024, 2048, 4096, 8192), \
+            "huy pupil sampling must be a power of 2 between 256 and 8192"
     # POP ladder rung + grid (see POP_SETTINGS at the top of the file)
     pop_rung = 3
     pop_samp = int(POP_SETTINGS["samp"])
+    if mode == "huy":
+        pop_rung = 4                     # hybrid system, rung-4 references
     if mode == "pop":
         if len(argv) > 3:
             pop_rung = int(argv[3])
-        assert pop_rung in (0, 1, 2, 3), \
-            "pop rung must be 0 (stock us_stand.dll UDS test), 1, 2 or 3"
+        assert pop_rung in (0, 1, 2, 3, 4), \
+            "pop rung must be 0 (stock us_stand.dll UDS test), 1, 2, 3 " \
+            "or 4 (HYBRID: paraxial lens + residual-phase zone DLL)"
         if len(argv) > 5:
             pop_samp = int(argv[5])
         assert pop_samp in (512, 1024, 2048, 4096, 8192), \
             "pop samp must be a power of 2 between 512 and 8192"
+        # argv[6] = 'point': rung 4 with Avg cell = 0 (point-sampled
+        # residual, rel_surf_tran = 1). DISCRIMINATOR (2026-09-07): if
+        # POP applies the UDS phase, the point sample aliases the folds
+        # and the PSF is garbage (rung-3 signature, corr 0.5-0.8); if
+        # POP ignores the phase, the result is the bare Paraxial lens =
+        # an exact Airy pattern at every line (FWHM/Airy 1.00).
+        if len(argv) > 6 and argv[6].strip().lower() == "point":
+            POP_SETTINGS["avg_cell"] = 0.0
+            print("  POP rung 4 in POINT mode: Avg cell forced to 0 "
+                  "(phase-applied? -> aliased garbage; phase-ignored? -> "
+                  "exact Airy)")
     huygens_lams = ([float(v) for v in argv[3].split(",")]
                     if mode == "huygens" and len(argv) > 3
                     else [0.95])
@@ -359,6 +465,9 @@ def main():
     # mismatch, warn if the Surfaces folder is missing.
     # ------------------------------------------------------------------
     if "run_dir" in design:
+        section("ring table provenance",
+                "the table next to the DLLs must be byte-identical to "
+                "the run folder's (SHA256)")
         _fno = int(design["file_no"])
         src_tab = os.path.join(design["run_dir"],
                                "mdl_rings_%d.txt" % _fno)
@@ -372,17 +481,22 @@ def main():
             src_bytes = open(src_tab, "rb").read()
             dst_bytes = (open(dst_tab, "rb").read()
                          if os.path.exists(dst_tab) else None)
+            import hashlib as _hl
+            h_src = _hl.sha256(src_bytes).hexdigest()
+            h_dst = _hl.sha256(dst_bytes).hexdigest() \
+                if dst_bytes is not None else "(missing)"
             if dst_bytes == src_bytes:
                 print("  ring table in DLL folder matches the run "
-                      "folder (byte-identical)")
+                      "folder (byte-identical)  SHA256 %s" % h_src[:16])
             else:
                 import shutil as _sh
                 _sh.copy2(src_tab, dst_tab)
                 print("  ring table %s: DLL-folder copy %s -- SYNCED "
-                      "from the run folder"
+                      "from the run folder  (run %s  ->  DLL copy was %s)"
                       % (os.path.basename(src_tab),
                          "was STALE (different design!)"
-                         if dst_bytes is not None else "was missing"))
+                         if dst_bytes is not None else "was missing",
+                         h_src[:16], h_dst[:16]))
         else:
             print("  WARNING: %s not found -- copy %s there by hand "
                   "before trusting any Zemax result"
@@ -406,12 +520,15 @@ def main():
         variant = "paraxial"
     elif mode == "pop" and pop_rung == 0:
         variant = "uds_stand"        # OpticStudio's own us_stand.dll, flat
+    elif (mode == "pop" and pop_rung == 4) or mode == "huy":
+        variant = "hybrid"           # Paraxial f=F + zone DLL (Sub ideal=1)
     else:
         variant = "zone"
     dll_name = {"od": "us_mdl_rings_od.dll",
                 "zone": "us_mdl_rings.dll",
                 "paraxial": "(none: Paraxial surface)",
-                "uds_stand": "us_stand.dll"}[variant]
+                "uds_stand": "us_stand.dll",
+                "hybrid": "us_mdl_rings.dll (residual) behind a Paraxial lens"}[variant]
 
     # ------------------------------------------------------------------
     # pop wavelength selection (argv[4]): 'all' = every verification
@@ -419,9 +536,10 @@ def main():
     # -> POP_SETTINGS rung default (rungs 1-2: primary only -- they test
     # the instrument; rung 3: the representative comb lines).
     # ------------------------------------------------------------------
-    if mode == "pop":
-        sel = argv[4].strip().lower() if len(argv) > 4 else \
-            POP_SETTINGS["rung_default_lams"][pop_rung]
+    if mode in ("pop", "huy"):
+        sel = argv[3].strip().lower() if (mode == "huy" and len(argv) > 3) \
+            else (argv[4].strip().lower() if (mode == "pop" and len(argv) > 4)
+                  else POP_SETTINGS["rung_default_lams"][pop_rung])
         if sel == "all":
             pop_lams = list(design.get("lams_all_um", wavelengths_um))
         elif sel == "primary":
@@ -455,6 +573,10 @@ def main():
         wavelengths_um = rz_lams
         primary_idx = (len(rz_lams) + 1) // 2
 
+    section("design and run configuration",
+            "what is being validated, from which run folder, at which lines")
+    print("script version %s | %s" % (SCRIPT_VERSION,
+                                       os.path.abspath(__file__)))
     print("design: %s" % (design.get("run_dir", arg)))
     print("  EPD %.2f mm | BFD %.2f mm | ring table mdl_rings_%d.txt"
           % (epd_mm, bfd_mm, file_no))
@@ -483,6 +605,16 @@ def main():
               "um) and all z-planes came back BIT-IDENTICAL; do not "
               "trust output unless the dx echo reads ~2 lam F/# AND "
               "the per-plane peaks differ. Use 'rz' instead.")
+    if mode == "huy":
+        print("  HUYGENS PSF/MTF on the hybrid: Paraxial f=F + residual "
+              "UDS (Sub ideal=1, Avg cell = pupil pitch), pupil %d^2 -> "
+              "%.2f um rays, image %d^2 at %.2f um; %d wavelength(s). "
+              "One wavelet per traced ray with its OPD -- the ray engine "
+              "that can host the fold-scale residual (POP samples a UDS "
+              "with ~70 rays: DLL log 2026-09-07)"
+              % (huy_samp, 1000.0 * epd_mm / huy_samp,
+                 int(HUY_SETTINGS["image_samp"]),
+                 float(HUY_SETTINGS["image_delta_um"]), len(wavelengths_um)))
     if mode == "pop":
         print("  POP ladder rung %d (%s surface): grid %d^2, width %.1f "
               "mm -> %.2f um/sample; %d wavelength(s)"
@@ -492,7 +624,10 @@ def main():
         print("  rung meaning: 0 = stock us_stand.dll (does POP pass ANY "
               "UDS?); 1 = paraxial ideal lens vs analytic Airy "
               "(instrument check); 2 = od DLL, POP through our UDS "
-              "phase; 3 = zone DLL -- THE test vs rs/verify_rzmap.npz")
+              "phase; 3 = zone DLL -- THE test vs rs/verify_rzmap.npz; "
+              "4 = HYBRID: Paraxial f=F gives POP's pilot beam its focus, "
+              "zone DLL (Sub ideal=1) carries the residual phase on a "
+              "fine grid -- the fix for rung 3's collimated pilot")
     print("  DLL: %s | output -> %s" % (dll_name, out_dir))
     print("  REMINDER: mdl_rings_%d.txt must sit next to the DLLs in "
           "{Documents}\\Zemax\\DLL\\Surfaces\\" % file_no)
@@ -552,6 +687,9 @@ def main():
 
     TheLDE = TheSystem.LDE
 
+    section("build the OpticStudio system",
+            "surfaces, DLL parameters, wavelengths; saved as a .zos before "
+            "any analysis")
     # Surface 1: substrate front (STOP), model glass ~ AZ4562
     surf1 = TheLDE.GetSurfaceAt(1)
     surf1.Thickness = SUBSTRATE_MM
@@ -569,7 +707,8 @@ def main():
     # Surface 2: the MDL relief -- User Defined Surface DLL (or, for the
     # POP rung-1 instrument check, an ideal Paraxial lens of the same F)
     surf2 = TheLDE.InsertNewSurfaceAt(2)
-    if variant == "paraxial":
+    surf_par = None                      # the Paraxial lens (hybrid only)
+    if variant in ("paraxial", "hybrid"):
         par_type = surf2.GetSurfaceTypeSettings(
             ZOSAPI.Editors.LDE.SurfaceType.Paraxial)
         surf2.ChangeType(par_type)
@@ -579,6 +718,40 @@ def main():
         uds_type.Filename = dll_name
         surf2.ChangeType(uds_type)
     surf2.Thickness = bfd_mm
+    if variant == "hybrid":
+        # HYBRID (POP rung 4, 2026-09-07): surface 2 = Paraxial f = F
+        # (thickness 0) supplies the focusing -- POP's pilot beam is
+        # built from real rays and a phase-only surface leaves it
+        # collimated (measured 2026-09-04) -- and surface 3 = the zone
+        # DLL with Sub ideal = 1 carries the RESIDUAL design-minus-ideal
+        # phase, then F to the image. Thin elements at one plane.
+        surf_par = surf2
+        surf_par.Thickness = 0.0
+        surf_par.Comment = "IDEAL paraxial lens F=BFD (hybrid focusing)"
+        # MEASURED 2026-09-07 (huy primary, law 0, air-air): the Huygens
+        # PSF matched the NO-PHASE reference with the |m| apodization
+        # (ratio 1.002, corr 1.0000) -- like POP, the Huygens engine
+        # takes the surface phase from the PHYSICAL path of each ray;
+        # the +n2*z bookkeeping only exists in the batch-trace OPD
+        # output (rz). Both wave engines therefore get the index step
+        # and the physical law.
+        if mode in ("pop", "huy"):
+            try:
+                surf_par.Material = str(POP_SETTINGS["phase_glass"])
+                surf_par.Comment += " | %s behind it: index step for the " \
+                                    "residual UDS phase" % POP_SETTINGS["phase_glass"]
+            except Exception as exc:
+                print("  (could not set %s behind the Paraxial surface: %s -- "
+                      "POP will see NO residual phase)"
+                      % (POP_SETTINGS["phase_glass"], exc))
+        surf_par.GetSurfaceCell(ZOSAPI.Editors.LDE.SurfaceColumn.Par1)\
+            .DoubleValue = float(bfd_mm)
+        surf2 = TheLDE.InsertNewSurfaceAt(3)
+        uds_type = surf2.GetSurfaceTypeSettings(
+            ZOSAPI.Editors.LDE.SurfaceType.UserDefined)
+        uds_type.Filename = "us_mdl_rings.dll"
+        surf2.ChangeType(uds_type)
+        surf2.Thickness = bfd_mm
 
     def set_par(num, value):
         col = getattr(ZOSAPI.Editors.LDE.SurfaceColumn, "Par%d" % num)
@@ -587,6 +760,16 @@ def main():
     if variant == "paraxial":
         surf2.Comment = "IDEAL paraxial lens F=BFD (POP rung 1)"
         set_par(1, bfd_mm)               # Paraxial: Par 1 = focal length
+    elif variant == "hybrid":
+        surf2.Comment = "MDL Rings RESIDUAL phase (Sub ideal=1, hybrid)"
+        set_par(1, file_no)
+        set_par(2, 1.0)                  # height scale
+        set_par(3, 1.0)                  # z sign
+        set_par(4, bfd_mm)               # F for the ideal-lens subtraction
+        set_par(5, 1.0)                  # Sub ideal = 1
+        # OPD law: POP needs the physical path (index step); the ray
+        # engines (Huygens, batch trace) use the calibrated +n2*z law
+        set_par(7, 1.0 if mode in ("pop", "huy") else 0.0)
     elif variant == "uds_stand":
         # OpticStudio's own standard-surface UDS (UserDefinedSurface3
         # entry point), left FLAT: does POP propagate through ANY User
@@ -645,7 +828,8 @@ def main():
                 "rz": "mdl_validation_rz.zos",
                 "rzfft": "mdl_validation_rzfft.zos",
                 "huygens": "mdl_validation_huygens.zos",
-                "pop": "mdl_validation_pop_r%d.zos" % pop_rung}[mode]
+                "pop": "mdl_validation_pop_r%d.zos" % pop_rung,
+                "huy": "mdl_validation_huygens_hybrid.zos"}[mode]
     TheSystem.SaveAs(os.path.join(out_dir, zos_name))
     print("saved system -> %s (will be re-saved after the analyses)"
           % zos_name)
@@ -827,7 +1011,7 @@ def main():
                  else "; output capped at %s" % out_ok))
         return True
 
-    if mode == "pop":
+    if mode in ("pop", "huy"):
         # --------------------------------------------------------------
         # PHYSICAL OPTICS PROPAGATION LADDER (see POP_SETTINGS header).
         #
@@ -877,86 +1061,235 @@ def main():
         samp_idx = int(round(_math.log2(pop_samp))) - 4  # 32 -> 1
         na_par = epd_mm / (2.0 * bfd_mm)                 # paraxial NA
         F_um = bfd_mm * 1000.0
-        npz_path = os.path.join(out_dir, "pop_r%d.npz" % pop_rung)
+        npz_path = os.path.join(out_dir, "pop_r%d.npz" % pop_rung
+                                if mode == "pop" else "huygens_hybrid.npz")
         store = {"rung": pop_rung, "variant": variant, "samp": pop_samp,
                  "width_mm": width_mm, "lam_um": np.array(wavelengths_um)}
 
-        # --- substrate medium -> AIR for POP ---------------------------
-        # MEASURED 2026-09-04: with the beam launched in the substrate
-        # (surface 1, MaterialModel solve nd 1.6274) POP built a pilot
-        # beam with Rayleigh = 0 and Size = NaN at the start surface for
-        # every real beam type, i.e. z_R = pi w^2 n / lam with n = 0:
-        # POP does not evaluate the Material-Model solve (File/DLL beams,
-        # which bypass it, reported z_R = 4188.8 mm = n 1 exactly). The
-        # substrate is a plane-parallel plate at normal incidence -- no
-        # effect on a collimated launch -- and neither DLL uses n1 (zone
-        # OPD = n2 z; od bends with l = 0), so POP mode runs it in air.
-        try:
-            surf1.MaterialCell.SetSolveData(
-                surf1.MaterialCell.CreateSolveType(
-                    ZOSAPI.Editors.SolveType.Fixed))
-            surf1.Material = ""
-            surf1.Comment = "substrate front (AIR for POP: model-glass " \
-                            "solve not evaluated by POP)"
-            print("  surface 1 medium set to AIR for POP (model-glass "
-                  "solve gives POP n=0 -> NaN pilot beam)")
-        except Exception as exc:
-            print("  (could not set surface 1 to air: %s)" % exc)
-
-        # --- HARD circular aperture on the STOP (surface 1) ------------
-        # POP clips the beam at HARD apertures, not at the automatic
-        # semi-diameter. With the aperture in place the illumination
-        # inside the pupil is set by the aperture, which makes a wide
-        # Gaussian launch (waist 5 R -> <= 8 % roll-off at the edge) a
-        # near-uniform disc: the fallback when the top-hat beam type
-        # will not build a pilot beam (measured 2026-09-04: NaN pilot).
-        try:
-            apd = surf1.ApertureData
-            aset = apd.CreateApertureTypeSettings(
-                ZOSAPI.Editors.LDE.SurfaceApertureTypes.CircularAperture)
-            aset._S_CircularAperture.MinimumRadius = 0.0
-            aset._S_CircularAperture.MaximumRadius = epd_mm / 2.0
-            apd.ChangeApertureTypeSettings(aset)
-            print("  hard circular aperture R=%.3f mm set on the STOP "
-                  "(surface 1) for POP" % (epd_mm / 2.0))
-        except Exception as exc:
-            print("  (could not set a hard aperture on surface 1: %s -- "
-                  "a Gaussian launch will NOT be clipped to the pupil)"
-                  % exc)
-
-        # --- surface-2 Physical Optics flags (best effort, echoed) -----
-        try:
-            pod = surf2.PhysicalOpticsData
-            # MEASURED 2026-09-04: for a User Defined Surface OpticStudio
-            # auto-sets UseRaysToPropagateToNextSurface = True (it deems
-            # the UDS unsupported for diffraction transfer and hands the
-            # beam over by RAYS, which also throws away the diffraction
-            # from surface 2 to the image -- useless for us -- and, as
-            # measured, returned no data at all). Force it OFF so POP
-            # must apply the surface through its OPD (the batch-trace-
-            # validated +n2*z law), and echo the flags actually in force.
+        if mode == "pop":
+            section("POP: prepare the surfaces",
+                    "media, hard aperture, per-surface Physical Optics flags "
+                    "(every value echoed as READ BACK from OpticStudio)")
+            # --- substrate medium -> AIR for POP ---------------------------
+            # MEASURED 2026-09-04: with the beam launched in the substrate
+            # (surface 1, MaterialModel solve nd 1.6274) POP built a pilot
+            # beam with Rayleigh = 0 and Size = NaN at the start surface for
+            # every real beam type, i.e. z_R = pi w^2 n / lam with n = 0:
+            # POP does not evaluate the Material-Model solve (File/DLL beams,
+            # which bypass it, reported z_R = 4188.8 mm = n 1 exactly). The
+            # substrate is a plane-parallel plate at normal incidence -- no
+            # effect on a collimated launch -- and neither DLL uses n1 (zone
+            # OPD = n2 z; od bends with l = 0), so POP mode runs it in air.
             try:
-                pod.UseRaysToPropagateToNextSurface = False
+                surf1.MaterialCell.SetSolveData(
+                    surf1.MaterialCell.CreateSolveType(
+                        ZOSAPI.Editors.SolveType.Fixed))
+                surf1.Material = ""
+                surf1.Comment = "substrate front (AIR for POP: model-glass " \
+                                "solve not evaluated by POP)"
+                print("  surface 1 medium set to AIR for POP (model-glass "
+                      "solve gives POP n=0 -> NaN pilot beam)")
             except Exception as exc:
-                print("  (could not clear UseRaysToPropagate on surface "
-                      "2: %s)" % exc)
-            if POP_SETTINGS["angular_spectrum"] is not None:
-                pod.UseAngularSpectrumPropagator = \
-                    bool(POP_SETTINGS["angular_spectrum"])
-            print("  surface 2 Physical Optics: UseAngularSpectrum=%s "
-                  "UseRaysToPropagate=%s ResampleAfterRefraction=%s"
-                  % (getattr(pod, "UseAngularSpectrumPropagator", "?"),
-                     getattr(pod, "UseRaysToPropagateToNextSurface", "?"),
-                     getattr(pod, "ResampleAfterRefraction", "?")))
-            for sidx in (1,):
+                print("  (could not set surface 1 to air: %s)" % exc)
+
+            # --- HARD circular aperture on the STOP (surface 1) ------------
+            # POP clips the beam at HARD apertures, not at the automatic
+            # semi-diameter. With the aperture in place the illumination
+            # inside the pupil is set by the aperture, which makes a wide
+            # Gaussian launch (waist 5 R -> <= 8 % roll-off at the edge) a
+            # near-uniform disc: the fallback when the top-hat beam type
+            # will not build a pilot beam (measured 2026-09-04: NaN pilot).
+            try:
+                apd = surf1.ApertureData
+                aset = apd.CreateApertureTypeSettings(
+                    ZOSAPI.Editors.LDE.SurfaceApertureTypes.CircularAperture)
+                aset._S_CircularAperture.MinimumRadius = 0.0
+                aset._S_CircularAperture.MaximumRadius = epd_mm / 2.0
+                apd.ChangeApertureTypeSettings(aset)
+                print("  hard circular aperture R=%.3f mm set on the STOP "
+                      "(surface 1) for POP" % (epd_mm / 2.0))
+            except Exception as exc:
+                print("  (could not set a hard aperture on surface 1: %s -- "
+                      "a Gaussian launch will NOT be clipped to the pupil)"
+                      % exc)
+
+            # --- per-surface Physical Optics flags (best effort, echoed) ---
+        def try_set(obj, names, values, verify=True):
+            """Set the first attribute of `names` that accepts one of
+            `values`; returns (name, value) or (None, None). Read-back
+            verified so a silently ignored assignment is not reported
+            as a success."""
+            for nm in names:
+                if not hasattr(obj, nm):
+                    continue
+                for val in values:
+                    try:
+                        setattr(obj, nm, val)
+                        if verify:
+                            got = getattr(obj, nm)
+                            if isinstance(val, bool) and bool(got) != val:
+                                continue
+                        return nm, val
+                    except Exception:
+                        continue
+            return None, None
+
+        def probe_members(obj, label, keys=("Samp", "Width", "Auto",
+                                             "Resamp", "ReSamp", "Rays",
+                                             "Angular", "Rescale")):
+            """One-line echo of the attribute names of a ZOS-API object
+            that contain any of `keys` -- the only reliable way to learn
+            the real property names on this OpticStudio build."""
+            try:
+                names = sorted(a for a in dir(obj) if not a.startswith("_")
+                               and any(k.lower() in a.lower() for k in keys))
+                print("  %s members: %s" % (label, ", ".join(names)
+                                            if names else "(none matched)"))
+            except Exception as exc:
+                print("  (%s members not listable: %s)" % (label, exc))
+
+        def samp_enum_candidates(n, current=None):
+            """Values to try for a SampleSizes-typed property. MEASURED
+            2026-09-07: the surface Physical Optics XSampling reads back
+            as 'S32' -- a different enum from Analysis.SampleSizes
+            (S_32x32), and neither namespace guess matched, so the
+            beam was re-sampled to 32^2. Therefore: take the enum TYPE
+            from the property's current value and pick the member whose
+            name contains the grid size; the namespace guesses and the
+            plain integers stay as fallbacks."""
+            out = []
+            if current is not None:
                 try:
-                    pod1 = TheLDE.GetSurfaceAt(sidx).PhysicalOpticsData
-                    pod1.UseRaysToPropagateToNextSurface = False
+                    et = type(current)
+                    names = []
+                    try:
+                        import System
+                        names = list(System.Enum.GetNames(et))
+                    except Exception:
+                        names = [a for a in dir(et) if not a.startswith("_")]
+                    for nm in names:
+                        digits = "".join(ch for ch in nm if ch.isdigit())
+                        if digits.startswith(str(n)) and \
+                                (digits == str(n) or
+                                 digits == str(n) + str(n)):
+                            out.append(getattr(et, nm))
+                            break
+                    if not out:
+                        print("  (no member of %s names %d: %s)"
+                              % (et, n, ", ".join(names)))
+                except Exception as exc:
+                    print("  (sampling enum type not resolvable: %s)" % exc)
+            for path in ("Analysis.SampleSizes", "Editors.LDE.SampleSizes",
+                         "Analysis.Settings.SampleSizes"):
+                try:
+                    ns = ZOSAPI
+                    for part in path.split("."):
+                        ns = getattr(ns, part)
+                    out.append(getattr(ns, "S_%dx%d" % (n, n)))
                 except Exception:
-                    pass
-        except Exception as exc:
-            print("  (surface Physical Optics flags not reachable: %s)"
-                  % exc)
+                    continue
+            out.append(int(round(_math.log2(n))) - 4)
+            out.append(int(n))
+            return out
+
+        def pop_flags(surf, label, resample=False):
+            """UseRaysToPropagate OFF (MEASURED 2026-09-04: OpticStudio
+            auto-sets it True for a User Defined Surface, hands the beam
+            over by rays and returns nothing), optional angular-spectrum
+            flag, and -- resample=True -- a FORCED re-sample after
+            refraction to width_mm / pop_samp so the beam leaves the
+            lens plane on the fine grid the fold structure needs
+            (~3 um), instead of POP's automatic launch width
+            waist*sqrt(pi N) (measured 290/581 mm at 1024/4096).
+            Everything is echoed as read back, never as requested."""
+            try:
+                pod = surf.PhysicalOpticsData
+            except Exception as exc:
+                print("  (%s Physical Optics flags not reachable: %s)"
+                      % (label, exc))
+                return
+            if POP_SETTINGS.get("echo_members"):
+                probe_members(pod, "%s PhysicalOpticsData" % label)
+            nm, _ = try_set(pod, ("UseRaysToPropagateToNextSurface",),
+                            (False,))
+            if nm is None:
+                print("  (could not clear UseRaysToPropagate on %s)" % label)
+            if POP_SETTINGS["angular_spectrum"] is not None:
+                try_set(pod, ("UseAngularSpectrumPropagator",),
+                        (bool(POP_SETTINGS["angular_spectrum"]),))
+            if resample:
+                # MEASURED 2026-09-07: ResampleAfterRefraction=True with
+                # XSampling left at its default S32 re-sampled the whole
+                # beam to 32^2 (dx 1.5 mm; the focal extent lam F / dx
+                # confirmed it was the real grid, not the display). The
+                # sampling is therefore set FIRST and the re-sample is
+                # enabled only if both samplings read back as requested.
+                cur = getattr(pod, "XSampling", None)
+                cands = samp_enum_candidates(pop_samp, current=cur)
+                r3, v3 = try_set(pod, ("XSampling",), cands, verify=False)
+                r4, v4 = try_set(pod, ("YSampling",), cands, verify=False)
+                okx = str(pop_samp) in str(getattr(pod, "XSampling", ""))
+                oky = str(pop_samp) in str(getattr(pod, "YSampling", ""))
+                r5, _ = try_set(pod, ("XWidth",), (float(width_mm),),
+                                verify=False)
+                r6, _ = try_set(pod, ("YWidth",), (float(width_mm),),
+                                verify=False)
+                if okx and oky:
+                    r1, _ = try_set(pod, ("ReSampleAfterRefraction",
+                                          "ResampleAfterRefraction"), (True,))
+                    r2, _ = try_set(pod, ("AutoResample",
+                                          "AutomaticResample"), (False,))
+                else:
+                    r1 = r2 = None
+                    try_set(pod, ("ReSampleAfterRefraction",
+                                  "ResampleAfterRefraction"), (False,))
+                    print("  %s: sampling enum NOT settable to %d (reads "
+                          "%s / %s) -> re-sample left OFF; the launch "
+                          "width carries the grid"
+                          % (label, pop_samp, getattr(pod, "XSampling", "?"),
+                             getattr(pod, "YSampling", "?")))
+                print("  %s forced re-sample: resample=%s auto=%s "
+                      "XSampling=%s (%s) YSampling=%s XWidth=%s YWidth=%s"
+                      % (label, r1 or "OFF", r2 or "-",
+                         r3 or "NOT FOUND", v3, r4 or "NOT FOUND",
+                         r5 or "NOT FOUND", r6 or "NOT FOUND"))
+            else:
+                # never leave a stale re-sample on a surface we do not
+                # control: it would replace the grid silently
+                try_set(pod, ("ReSampleAfterRefraction",
+                              "ResampleAfterRefraction"), (False,))
+            # read-back echo of everything that matters
+            keys = ("UseAngularSpectrumPropagator",
+                    "UseRaysToPropagateToNextSurface",
+                    "ReSampleAfterRefraction", "ResampleAfterRefraction",
+                    "AutoResample", "XSampling", "YSampling",
+                    "XWidth", "YWidth", "DoNotRescaleBeamSize")
+            got = []
+            for k in keys:
+                if hasattr(pod, k):
+                    try:
+                        got.append("%s=%s" % (k, getattr(pod, k)))
+                    except Exception:
+                        got.append("%s=?" % k)
+            print("  %s Physical Optics (read back): %s"
+                  % (label, ", ".join(got) if got else "(nothing readable)"))
+
+        if mode == "pop":
+            try:
+                pop_flags(surf1, "surface 1 (stop)")
+                if surf_par is not None:
+                    # hybrid: the Paraxial lens is the LENS PLANE -- resample
+                    # there, and the residual UDS (zero distance behind it)
+                    # inherits the fine grid
+                    pop_flags(surf_par, "surface 2 (Paraxial lens)",
+                              resample=bool(POP_SETTINGS["resample_lens_plane"]))
+                    pop_flags(surf2, "surface 3 (residual UDS)")
+                else:
+                    pop_flags(surf2, "surface 2 (%s)" % variant,
+                              resample=bool(POP_SETTINGS["resample_lens_plane"]))
+            except Exception as exc:
+                print("  (surface Physical Optics flags not reachable: %s)"
+                      % exc)
 
         # POP_BEAMTYPE table, MEASURED 2026-09-04 (0-based dropdown
         # order): 4 = File and 5 = DLL returned POP's defaults with an
@@ -987,6 +1320,9 @@ def main():
                 st = an.GetSettings()
                 cfg = os.path.join(out_dir, "_pop_w%d.cfg" % wi)
                 st.SaveTo(cfg)
+                # POP_AUTO BEFORE the widths: with auto on, OpticStudio
+                # recomputes X/Y width from the waist (waist*sqrt(pi N),
+                # measured 2026-09-04) and a width sent earlier is lost
                 pairs = [("POP_START", pop_state["start"]),
                          ("POP_END", end_surface),
                          ("POP_WAVE", wi),
@@ -994,11 +1330,11 @@ def main():
                          ("POP_BEAMTYPE", int(launch["code"])),
                          ("POP_PARAM1", float(launch["waist"])),  # X
                          ("POP_PARAM2", float(launch["waist"])),  # Y
+                         ("POP_AUTO", int(launch["auto"])),
                          ("POP_SAMPX", s_idx),
                          ("POP_SAMPY", s_idx),
                          ("POP_WIDEX", width_mm),
                          ("POP_WIDEY", width_mm),
-                         ("POP_AUTO", int(launch["auto"])),
                          ("POP_DATA", 0)]              # irradiance
                 applied = []
                 for code, val in pairs:
@@ -1014,39 +1350,98 @@ def main():
                           % ", ".join(applied))
             except Exception as exc:
                 failed.append("route(%s)" % exc)
-            # typed reinforcement for the two unambiguous fields
+            # typed reinforcement: start/end/wavelength, then the
+            # auto-sampling flag and the array widths under whatever
+            # names this build exposes (probed and echoed ONCE -- the
+            # MODIFYSETTINGS codes left auto sampling ON on 2026-09-04)
             try:
                 ts = typed_settings(an, "StartSurface")
                 if hasattr(ts, "StartSurface"):
-                    ts.StartSurface = pop_state["start"]
-                    ts.EndSurface = end_surface
+                    # IAS_Surface objects (MEASURED 2026-09-07: assigning
+                    # an int raises and, until today, silently voided
+                    # the whole typed block)
+                    for attr, val in (("StartSurface", pop_state["start"]),
+                                      ("EndSurface", end_surface)):
+                        obj = getattr(ts, attr)
+                        if hasattr(obj, "SetSurfaceNumber"):
+                            obj.SetSurfaceNumber(int(val))
+                        else:
+                            setattr(ts, attr, int(val))
                 if hasattr(ts, "Wavelength"):
                     ts.Wavelength.SetWavelengthNumber(wi)
-            except Exception:
-                pass
+                if not pop_state.get("typed_probed") and \
+                        POP_SETTINGS.get("echo_members"):
+                    pop_state["typed_probed"] = True
+                    probe_members(ts, "POP typed settings",
+                                  keys=("Auto", "Width", "Samp", "Beam",
+                                        "Waist", "Param"))
+                auto_nm, _ = try_set(
+                    ts, ("AutoSampling", "AutomaticSampling",
+                         "UseAutomaticSampling", "AutoBeamSampling",
+                         "UseAutoSampling"), (bool(launch["auto"]),))
+                w_nm, _ = try_set(ts, ("XWidth", "WidthX"),
+                                  (float(width_mm),), verify=False)
+                try_set(ts, ("YWidth", "WidthY"), (float(width_mm),),
+                        verify=False)
+                s_nm, s_v = try_set(ts, ("XSampling", "SamplingX"),
+                                    samp_enum_candidates(samp),
+                                    verify=False)
+                try_set(ts, ("YSampling", "SamplingY"),
+                        samp_enum_candidates(samp), verify=False)
+                if echo:
+                    print("  POP typed settings applied: auto flag via %s, "
+                          "width via %s, sampling via %s (%s)"
+                          % (auto_nm or "NOT FOUND", w_nm or "NOT FOUND",
+                             s_nm or "NOT FOUND", s_v))
+            except Exception as exc:
+                if echo:
+                    print("  (typed POP settings not applied: %s)" % exc)
             return failed
 
-        def radial_profile(arr, dx_um, r_max_um):
-            """Azimuthal average around the peak pixel: (r_um, prof,
-            peak_xy_um relative to grid center)."""
+        def radial_profile(arr, dx_um, r_max_um, fine_um=0.05):
+            """Azimuthal average around the TRUE peak: (r_um, prof,
+            peak_xy_um relative to grid center).
+
+            MEASURED 2026-09-07: binning the 2-D irradiance in annuli
+            of the grid pitch and reading the half-maximum crossing
+            inflates the FWHM by 8-10 % at ~5 samples per FWHM (POP's
+            focal pitch lam F / (N dx) is 0.42-1.17 um here, and the
+            axis of an even grid sits on a pixel CORNER, so the peak
+            pixel under-reads too): a sampled Airy pattern measured
+            1.078-1.102 x its true FWHM with the old estimator, 1.004
+            at 46 samples per FWHM (rung 1). The sub-image is therefore
+            up-sampled (cubic spline) to fine_um before the peak search
+            and the annular binning -- the estimator is then unbiased
+            for any dx down to ~3 samples per FWHM."""
+            from scipy.ndimage import zoom as _zoom
             ny, nx = arr.shape
             iy, ix = np.unravel_index(int(np.argmax(arr)), arr.shape)
-            half = int(np.ceil(r_max_um / dx_um)) + 2
+            half = int(np.ceil(r_max_um / dx_um)) + 4
             y0, y1 = max(iy - half, 0), min(iy + half + 1, ny)
             x0, x1 = max(ix - half, 0), min(ix + half + 1, nx)
-            sub = arr[y0:y1, x0:x1]
-            yy, xx = np.mgrid[y0:y1, x0:x1]
-            rr = np.hypot((xx - ix) * dx_um, (yy - iy) * dx_um)
-            k = np.floor(rr / dx_um).astype(int)
-            nb = int(np.ceil(r_max_um / dx_um)) + 1
+            sub = np.nan_to_num(arr[y0:y1, x0:x1])
+            up = max(int(round(dx_um / fine_um)), 1)
+            if up > 1:
+                subf = _zoom(sub, up, order=3, grid_mode=True,
+                             mode="nearest")
+                dxf = dx_um / up
+            else:
+                subf, dxf = sub, dx_um
+            jy, jx = np.unravel_index(int(np.argmax(subf)), subf.shape)
+            yy, xx = np.mgrid[0:subf.shape[0], 0:subf.shape[1]]
+            rr = np.hypot((xx - jx) * dxf, (yy - jy) * dxf)
+            k = np.floor(rr / dxf).astype(int)
+            nb = int(np.ceil(r_max_um / dxf)) + 1
             sel = k < nb
-            s = np.bincount(k[sel], weights=sub[sel], minlength=nb)
+            s = np.bincount(k[sel], weights=subf[sel], minlength=nb)
             c = np.bincount(k[sel], minlength=nb)
             prof = np.where(c > 0, s / np.maximum(c, 1), 0.0)
-            r_um = (np.arange(nb) + 0.5) * dx_um
+            r_um = (np.arange(nb) + 0.5) * dxf
             r_um[0] = 0.0
-            pk_xy = ((ix - nx / 2.0) * dx_um, (iy - ny / 2.0) * dx_um)
-            return r_um, prof, pk_xy
+            # peak position on the original grid, relative to its center
+            pk_x = (x0 + (jx + 0.5) / up - 0.5 - nx / 2.0) * dx_um
+            pk_y = (y0 + (jy + 0.5) / up - 0.5 - ny / 2.0) * dx_um
+            return r_um, prof, (pk_x, pk_y)
 
         def fwhm_of(r, I):
             if I.size < 3 or I.max() <= 0:
@@ -1168,91 +1563,394 @@ def main():
                 else float("nan")
             return lvl_in, lvl_out, flat, r_edge
 
-        # --- LAUNCH-BEAM CALIBRATION (every rung): find the beam-type
-        # code that produces a flat disc of radius EPD/2. Propagated to
-        # the NEXT surface (start+1: 1.1 mm of substrate -- a top hat is
-        # unchanged over that distance), because a zero-length
-        # propagation (end = start) returns nothing. Done at 1024^2 for
-        # speed; the chosen code is then used at the requested grid.
-        chosen = None
-        for start_try in (start_surf, start_surf + 1):
-          if chosen is not None:
-              break
-          pop_state["start"] = start_try
-          print("  launch calibration with POP start surface %d (%s)"
-                % (start_try, "substrate front" if start_try == start_surf
-                   else "the MDL/lens surface itself"))
-          for li, launch in enumerate(POP_LAUNCH_CANDIDATES):
-            tagl = "launch %s (code %d, auto %d, waist %.2f mm)" % (
-                launch["name"], launch["code"], launch["auto"],
-                launch["waist"])
-            res0 = run_pop(1, start_try + 1, tagl, launch=launch,
-                           samp=1024, echo=(li == 0))
-            if res0 is None:
-                print("  %s: no data (NaN pilot / invalid)" % launch["name"])
-                continue
-            arr0, dx0, dy0, desc0 = res0
-            lvl_in, lvl_out, flat, r_edge = launch_metrics(arr0, dx0, dy0)
-            print("  %s: plateau %.4g, outside %.4g, in-disc ripple "
-                  "%.2e, edge radius %.3f mm (want %.3f)"
-                  % (launch["name"], lvl_in, lvl_out, flat, r_edge,
-                     epd_mm / 2.0))
-            ok_edge = np.isfinite(r_edge) and \
-                abs(r_edge - epd_mm / 2.0) < 0.05 * epd_mm
-            ok_flat = np.isfinite(flat) and flat < 0.10
-            if start_try != start_surf:
-                # launched AT the lens: the next surface is the image,
-                # so the field is the focus, not a disc -- accept finite
-                # positive data and let the rung-1 Airy verdict judge
-                # whether the lens phase was applied at launch.
-                fin = np.isfinite(arr0).all() and np.nansum(arr0) > 0
-                print("  (launch at the lens: disc test not applicable; "
-                      "data %s)" % ("finite, accepted" if fin else
-                                     "invalid"))
-                ok_edge = ok_flat = fin
-                lvl_in = 1.0 if fin else float("nan")
-                r_edge = epd_mm / 2.0
-                flat = 0.0
-            if ok_edge and ok_flat and np.isfinite(lvl_in) and lvl_in > 0:
-                chosen = launch
-                ny0, nx0 = arr0.shape
-                store["launch_I"] = arr0[::max(nx0 // 512, 1),
-                                         ::max(nx0 // 512, 1)]
-                store["launch_dx_um"] = dx0 * max(nx0 // 512, 1)
-                store["launch_code"] = launch["code"]
-                store["launch_auto"] = launch["auto"]
-                store["launch_waist_mm"] = launch["waist"]
-                print("  -> '%s' gives a flat disc of radius %.3f mm "
-                      "(ripple %.1f%%); using it for the ladder"
-                      % (launch["name"], r_edge, 100 * flat))
-                break
-        if chosen is None:
-            if pop_rung == 0:
-                print("  RUNG 0 verdict: POP ABORTS even through "
-                      "OpticStudio's own us_stand.dll -> User Defined "
-                      "Surfaces are NOT propagated by POP in this build "
-                      "(the 'Use Rays To Propagate' flag is forced on and "
-                      "the ray hand-off fails). Porting our DLLs will not "
-                      "help; the POP model of the MDL must use a "
-                      "POP-native surface (Grid Phase / Grid Sag of the "
-                      "ring profile, or Binary 2 carrier + residual).")
-            elif pop_rung in (2, 3):
-                print("  (rungs 2/3 launch through our UDS: run 'pop 0' "
-                      "to learn whether ANY UDS passes POP here)")
-            print("  NO candidate gave a flat EPD/2 disc -- the ladder "
-                  "cannot proceed. Read the echo above: if every "
-                  "candidate returned no data the failure is upstream "
-                  "of the beam type (settings route, sampling cap, or "
-                  "POP unavailable headless); if a disc appeared with "
-                  "the wrong radius, POP_PARAM1/2 are not the top-hat "
-                  "half-widths in this build.")
-            np.savez_compressed(npz_path, **store)
-            TheSystem.SaveAs(os.path.join(out_dir, zos_name))
-            del zos
-            return
-        pop_state["launch"] = chosen
+        if surf_par is not None:
+            section("POP hybrid: focus check of the Paraxial lens",
+                    "one marginal real ray through glass + flat interface "
+                    "must reach the axis at the image")
+        # --- hybrid: does the Paraxial lens focus at F THROUGH the glass
+        # and the flat interface? Trace one marginal real ray (Height
+        # scale 0 = flat residual surface) to the image; if it misses
+        # the axis, the Paraxial 'focal length' is being applied as a
+        # geometric slope in the glass and must be n1 F. Echoed.
+        if surf_par is not None:
+            def marginal_y(py=0.9):
+                rt_ = TheSystem.Tools.OpenBatchRayTrace()
+                nm_ = rt_.CreateNormUnpol(
+                    2, ZOSAPI.Tools.RayTrace.RaysType.Real,
+                    TheLDE.NumberOfSurfaces - 1)
+                nm_.ClearData()
+                nm_.AddRay(primary_idx, 0.0, 0.0, 0.0, py,
+                           ZOSAPI.Tools.RayTrace.OPDMode.Current)
+                rt_.RunAndWaitForCompletion()
+                nm_.StartReadingResults()
+                res_ = nm_.ReadNextResult()
+                rt_.Close()
+                ok_, err_, y_ = res_[0], res_[2], res_[6]
+                return (float(y_) if ok_ and err_ == 0 else float("nan"))
+            set_par(2, 0.0)                     # flat residual surface
+            y0_mm = 0.9 * epd_mm / 2.0
+            y_img = marginal_y()
+            print("  hybrid focus check: marginal ray (h=%.3f mm) at the "
+                  "image with Paraxial f=%.4f: y=%.4f mm"
+                  % (y0_mm, bfd_mm, y_img))
+            if np.isfinite(y_img) and abs(y_img) > 0.002:
+                n_est = 1.0 - y_img / y0_mm
+                f_new = n_est * bfd_mm
+                surf_par.GetSurfaceCell(
+                    ZOSAPI.Editors.LDE.SurfaceColumn.Par1).DoubleValue = f_new
+                y_img2 = marginal_y()
+                print("  -> Paraxial f applied as a slope in the glass "
+                      "(implied n=%.4f); set f=%.4f mm -> y=%.4f mm"
+                      % (n_est, f_new, y_img2))
+                store["par_f_mm"] = f_new
+            else:
+                store["par_f_mm"] = bfd_mm
+            set_par(2, 1.0)
 
-        # --- RS references (rung 3) -------------------------------------
+        if mode == "pop":
+            section("POP: launch-beam calibration",
+                    "which beam type gives a flat disc of radius EPD/2 on the "
+                    "requested grid (1024^2 for speed)")
+            # --- LAUNCH-BEAM CALIBRATION (every rung): find the beam-type
+            # code that produces a flat disc of radius EPD/2. Propagated to
+            # the NEXT surface (start+1: 1.1 mm of substrate -- a top hat is
+            # unchanged over that distance), because a zero-length
+            # propagation (end = start) returns nothing. Done at 1024^2 for
+            # speed; the chosen code is then used at the requested grid.
+            chosen = None
+            for start_try in (start_surf, start_surf + 1):
+              if chosen is not None:
+                  break
+              pop_state["start"] = start_try
+              print("  launch calibration with POP start surface %d (%s)"
+                    % (start_try, "substrate front" if start_try == start_surf
+                       else "the MDL/lens surface itself"))
+              for li, launch in enumerate(POP_LAUNCH_CANDIDATES):
+                tagl = "launch %s (code %d, auto %d, waist %.2f mm)" % (
+                    launch["name"], launch["code"], launch["auto"],
+                    launch["waist"])
+                res0 = run_pop(1, start_try + 1, tagl, launch=launch,
+                               samp=1024, echo=(li == 0))
+                if res0 is None:
+                    print("  %s: no data (NaN pilot / invalid)" % launch["name"])
+                    continue
+                arr0, dx0, dy0, desc0 = res0
+                lvl_in, lvl_out, flat, r_edge = launch_metrics(arr0, dx0, dy0)
+                print("  %s: plateau %.4g, outside %.4g, in-disc ripple "
+                      "%.2e, edge radius %.3f mm (want %.3f)"
+                      % (launch["name"], lvl_in, lvl_out, flat, r_edge,
+                         epd_mm / 2.0))
+                ok_edge = np.isfinite(r_edge) and \
+                    abs(r_edge - epd_mm / 2.0) < 0.05 * epd_mm
+                ok_flat = np.isfinite(flat) and flat < 0.10
+                if start_try != start_surf:
+                    # launched AT the lens: the next surface is the image,
+                    # so the field is the focus, not a disc -- accept finite
+                    # positive data and let the rung-1 Airy verdict judge
+                    # whether the lens phase was applied at launch.
+                    fin = np.isfinite(arr0).all() and np.nansum(arr0) > 0
+                    print("  (launch at the lens: disc test not applicable; "
+                          "data %s)" % ("finite, accepted" if fin else
+                                         "invalid"))
+                    ok_edge = ok_flat = fin
+                    lvl_in = 1.0 if fin else float("nan")
+                    r_edge = epd_mm / 2.0
+                    flat = 0.0
+                if ok_edge and ok_flat and np.isfinite(lvl_in) and lvl_in > 0:
+                    chosen = launch
+                    ny0, nx0 = arr0.shape
+                    store["launch_I"] = arr0[::max(nx0 // 512, 1),
+                                             ::max(nx0 // 512, 1)]
+                    store["launch_dx_um"] = dx0 * max(nx0 // 512, 1)
+                    store["launch_code"] = launch["code"]
+                    store["launch_auto"] = launch["auto"]
+                    store["launch_waist_mm"] = launch["waist"]
+                    print("  -> '%s' gives a flat disc of radius %.3f mm "
+                          "(ripple %.1f%%); using it for the ladder"
+                          % (launch["name"], r_edge, 100 * flat))
+                    break
+            if chosen is None:
+                if pop_rung == 0:
+                    print("  RUNG 0 verdict: POP ABORTS even through "
+                          "OpticStudio's own us_stand.dll -> User Defined "
+                          "Surfaces are NOT propagated by POP in this build "
+                          "(the 'Use Rays To Propagate' flag is forced on and "
+                          "the ray hand-off fails). Porting our DLLs will not "
+                          "help; the POP model of the MDL must use a "
+                          "POP-native surface (Grid Phase / Grid Sag of the "
+                          "ring profile, or Binary 2 carrier + residual).")
+                elif pop_rung in (2, 3, 4):
+                    print("  (rungs 2/3/4 launch through our UDS: run 'pop 0' "
+                          "to learn whether ANY UDS passes POP here)")
+                print("  NO candidate gave a flat EPD/2 disc -- the ladder "
+                      "cannot proceed. Read the echo above: if every "
+                      "candidate returned no data the failure is upstream "
+                      "of the beam type (settings route, sampling cap, or "
+                      "POP unavailable headless); if a disc appeared with "
+                      "the wrong radius, POP_PARAM1/2 are not the top-hat "
+                      "half-widths in this build.")
+                np.savez_compressed(npz_path, **store)
+                TheSystem.SaveAs(os.path.join(out_dir, zos_name))
+                del zos
+                return
+            pop_state["launch"] = chosen
+
+            if surf_par is not None:
+                section("POP hybrid: grid pitch at the residual surface -> Avg cell",
+                        "the residual UDS must be cell-averaged on the pitch "
+                        "POP samples it with")
+            # --- rung 4: grid pitch at the residual surface -> Par 6 --------
+            # The residual UDS must be CELL-AVERAGED on the pitch POP samples
+            # it with (point sampling aliases the fold structure: radial
+            # model 2026-09-07, corr 0.67 -> 1.0000 at 141.8 um; rung 3 of
+            # 2026-09-04 measured 0.50-0.76). Probe the grid POP actually
+            # carries at surface 3 (after the surface-2 re-sample, if it was
+            # honoured) at the full sampling, and hand that pitch to the DLL.
+            if surf_par is not None:
+                cell_cfg = POP_SETTINGS["avg_cell"]
+                cell_mm = None
+                if cell_cfg == "grid":
+                    try:
+                        zone_idx = int(surf2.SurfaceNumber)
+                    except Exception:
+                        zone_idx = 3
+                    set_par(2, 0.0)             # flat during the probe
+                    for end_try in (zone_idx, zone_idx - 1):
+                        resp = run_pop(1, end_try, "grid probe to surface %d"
+                                       % end_try, samp=pop_samp)
+                        if resp is not None:
+                            cell_mm = resp[1] / 1000.0
+                            ngrid = resp[0].shape[1]
+                            print("  POP pitch at surface %d: %.3f um "
+                                  "(%d^2) -> Avg cell" % (end_try, resp[1],
+                                                           ngrid))
+                            if ngrid != pop_samp:
+                                print("  WARNING: POP carries a %d^2 grid, not "
+                                      "the requested %d^2 -- a per-surface "
+                                      "re-sample or a sampling cap replaced "
+                                      "it (the focal extent lam F / dx will "
+                                      "tell which grid is real)"
+                                      % (ngrid, pop_samp))
+                            break
+                    if cell_mm is None:
+                        print("  grid probe returned nothing -- Avg cell left "
+                              "at 0 (POINT-SAMPLED residual: expect the rung-3 "
+                              "aliasing)")
+                        cell_mm = 0.0
+                else:
+                    cell_mm = float(cell_cfg)
+                set_par(2, 1.0)
+                set_par(6, cell_mm)
+                store["avg_cell_mm"] = cell_mm
+                print("  residual UDS Par 6 (Avg cell) = %.4f mm%s"
+                      % (cell_mm, "" if cell_mm > 0 else "  [point sample]"))
+                if cell_mm > 0:
+                    # the box average is a sinc low-pass: amplitude
+                    # sinc(pi f c) at focal radius r = lam F f
+                    lam_p = wavelengths_um[0] * 1e-3
+                    f_edge = (POP_SETTINGS["r_max_um"] * 1e-3) / (lam_p * bfd_mm)
+                    att = np.sinc(f_edge * cell_mm)
+                    print("  cell-mean low-pass at the window edge r=%.0f um: "
+                          "amplitude x%.3f (%.1f%% irradiance) at %.2f um"
+                          % (POP_SETTINGS["r_max_um"], att, 100 * (1 - att**2),
+                             wavelengths_um[0]))
+
+        ENGINE = "POP" if mode == "pop" else "Huygens"
+        if mode == "huy":
+            section("Huygens: pupil ray pitch -> Avg cell",
+                    "one wavelet per pupil ray; the residual UDS is "
+                    "cell-averaged on the ray pitch EPD/N")
+            cell_mm = epd_mm / float(huy_samp)
+            set_par(6, cell_mm)
+            store["avg_cell_mm"] = cell_mm
+            store["huy_pupil_samp"] = huy_samp
+            store["huy_image_samp"] = int(HUY_SETTINGS["image_samp"])
+            store["huy_image_delta_um"] = float(HUY_SETTINGS["image_delta_um"])
+            print("  pupil sampling %d^2 -> ray pitch %.2f um = Avg cell; "
+                  "image %d^2 at %.2f um (+-%.1f um); polarization/"
+                  "transmission %s"
+                  % (huy_samp, 1000.0 * cell_mm,
+                     int(HUY_SETTINGS["image_samp"]),
+                     float(HUY_SETTINGS["image_delta_um"]),
+                     0.5 * int(HUY_SETTINGS["image_samp"])
+                     * float(HUY_SETTINGS["image_delta_um"]),
+                     "ON" if HUY_SETTINGS["use_polarization"] else "OFF"))
+
+            def samp_enum_any(n):
+                """enum candidates for a PSF/MTF sampling property"""
+                out = []
+                for path, pre in (("Analysis.Settings.Psf.PsfSampling", "PsfS_"),
+                                  ("Analysis.SampleSizes", "S_"),
+                                  ("Analysis.Settings.Mtf.HuygensMtfSampling", "S_"),
+                                  ("Analysis.Settings.HuygensPsfSampling", "S_")):
+                    try:
+                        ns = ZOSAPI
+                        for part in path.split("."):
+                            ns = getattr(ns, part)
+                        out.append(getattr(ns, "%s%dx%d" % (pre, n, n)))
+                    except Exception:
+                        continue
+                return out
+
+            def huy_configure(an, wi, kind):
+                """Typed settings first (echoed), MODIFYSETTINGS codes as
+                a fallback. kind = 'psf' | 'mtf'. Returns a description
+                of what was applied."""
+                applied = []
+                st = typed_settings(an, "PupilSampleSize")
+                nimg = int(HUY_SETTINGS["image_samp"])
+                for attr, vals in (("PupilSampleSize", samp_enum_any(huy_samp)),
+                                   ("ImageSampleSize", samp_enum_any(nimg))):
+                    nm, v = try_set(st, (attr,), vals, verify=False)
+                    applied.append("%s=%s" % (attr, v if nm else "NOT SET"))
+                nm, _ = try_set(st, ("ImageDelta",),
+                                (float(HUY_SETTINGS["image_delta_um"]),),
+                                verify=False)
+                applied.append("ImageDelta=%s" % (
+                    HUY_SETTINGS["image_delta_um"] if nm else "NOT SET"))
+                nm, _ = try_set(st, ("UsePolarization",),
+                                (bool(HUY_SETTINGS["use_polarization"]),))
+                applied.append("UsePolarization=%s" % (
+                    HUY_SETTINGS["use_polarization"] if nm else "NOT SET"))
+                if kind == "mtf":
+                    nm, _ = try_set(st, ("MaximumFrequency",),
+                                    (float(HUY_SETTINGS["max_freq_lpmm"]),),
+                                    verify=False)
+                    applied.append("MaximumFrequency=%s" % (
+                        HUY_SETTINGS["max_freq_lpmm"] if nm else "NOT SET"))
+                try:
+                    if hasattr(st, "Wavelength"):
+                        st.Wavelength.SetWavelengthNumber(wi)
+                        applied.append("wave=%d" % wi)
+                    if hasattr(st, "Field"):
+                        st.Field.SetFieldNumber(1)
+                except Exception as exc:
+                    applied.append("wave/field(%s)" % exc)
+                # fallback route for anything the typed interface refused
+                if any("NOT SET" in a for a in applied):
+                    pre = "HPS_" if kind == "psf" else "HMF_"
+                    s_p = int(round(_math.log2(huy_samp))) - 4
+                    s_i = int(round(_math.log2(nimg))) - 4
+                    pairs = [(pre + "WAVE", wi), (pre + "FIELD", 1),
+                             (pre + "PUPILSAMP", s_p), (pre + "IMAGESAMP", s_i),
+                             (pre + "IMAGEDELTA",
+                              float(HUY_SETTINGS["image_delta_um"])),
+                             (pre + "POLARIZATION",
+                              int(bool(HUY_SETTINGS["use_polarization"])))]
+                    if kind == "mtf":
+                        pairs.append((pre + "MAXF",
+                                      float(HUY_SETTINGS["max_freq_lpmm"])))
+                    ok_ = modify_settings_route(an, pairs, kind)
+                    applied.append("MODIFYSETTINGS %s route: %s"
+                                   % (pre, "ok" if ok_ else "failed"))
+                return ", ".join(applied)
+
+            def run_huygens(wi, tag, _retry=True):
+                """Huygens PSF at wavelength number wi -> (arr, dx_um,
+                dy_um, desc) like run_pop; dx unit auto-detected from
+                the requested image delta and echoed. An all-zero grid
+                (measured with UsePolarization=True, 2026-09-07) is
+                retried once with the polarization flag inverted."""
+                idm = ZOSAPI.Analysis.AnalysisIDM.HuygensPsf
+                an = TheSystem.Analyses.New_Analysis(idm)
+                desc_set = huy_configure(an, wi, "psf")
+                t0 = _time.time()
+                try:
+                    an.ApplyAndWaitForCompletion()
+                except Exception as exc:
+                    print("  Huygens PSF %s FAILED: %s" % (tag, exc))
+                    if not GUI:
+                        an.Close()
+                    return None
+                grids = grab_all_grids(an)
+                if not GUI:
+                    an.Close()
+                if grids is None:
+                    print("  Huygens PSF %s: no data (%s)" % (tag, desc_set))
+                    return None
+                arr, (dx_g, dy_g, minx, miny), desc = grids[0]
+                if not np.isfinite(arr).any() or np.nansum(np.abs(arr)) == 0:
+                    print("  Huygens PSF %s: grid is ALL ZERO / invalid "
+                          "(settings: %s)" % (tag, desc_set))
+                    if _retry:
+                        HUY_SETTINGS["use_polarization"] = \
+                            not HUY_SETTINGS["use_polarization"]
+                        print("  -> retrying once with UsePolarization=%s"
+                              % HUY_SETTINGS["use_polarization"])
+                        return run_huygens(wi, tag, _retry=False)
+                    return None
+                delta = float(HUY_SETTINGS["image_delta_um"])
+                if abs(dx_g * 1000.0 - delta) < abs(dx_g - delta):
+                    dx_um, dy_um, unit = dx_g * 1000.0, dy_g * 1000.0, "mm"
+                else:
+                    dx_um, dy_um, unit = dx_g, dy_g, "um"
+                ny, nx = arr.shape
+                print("  Huygens PSF %s: grid %dx%d, dx=%.3f um (DataGrid "
+                      "Dx=%.4g read as %s; requested %.2f um), extent "
+                      "%.1f x %.1f um, sum=%.4g  [%s]  (%.1fs)"
+                      % (tag, nx, ny, dx_um, dx_g, unit, delta, nx * dx_um,
+                         ny * dy_um, np.nansum(arr), desc,
+                         _time.time() - t0))
+                print("  settings: %s" % desc_set)
+                return arr, dx_um, dy_um, desc
+
+            def grab_series(an):
+                """All DataSeries as [(x, Y[n, nseries], labels)]."""
+                res = an.GetResults()
+                out = []
+                try:
+                    ns_ = int(res.NumberOfDataSeries)
+                except Exception:
+                    return out
+                for si in range(ns_):
+                    ds = res.GetDataSeries(si)
+                    try:
+                        x = np.array(list(ds.XData.Data), dtype=float)
+                        yd = ds.YData.Data
+                        nrow, ncol = int(yd.GetLength(0)), int(yd.GetLength(1))
+                        Y = np.array([[float(yd[i, j]) for j in range(ncol)]
+                                      for i in range(nrow)])
+                        labels = [str(v) for v in ds.SeriesLabels] \
+                            if hasattr(ds, "SeriesLabels") else []
+                        out.append((x, Y, labels, str(ds.Description)))
+                    except Exception as exc:
+                        print("  (DataSeries %d unreadable: %s)" % (si, exc))
+                return out
+
+            def run_huygens_mtf(wi, tag):
+                """Huygens MTF at wavelength number wi -> (f_lpmm, T, S)
+                or None."""
+                idm = ZOSAPI.Analysis.AnalysisIDM.HuygensMtf
+                an = TheSystem.Analyses.New_Analysis(idm)
+                desc_set = huy_configure(an, wi, "mtf")
+                t0 = _time.time()
+                try:
+                    an.ApplyAndWaitForCompletion()
+                except Exception as exc:
+                    print("  Huygens MTF %s FAILED: %s" % (tag, exc))
+                    if not GUI:
+                        an.Close()
+                    return None
+                series = grab_series(an)
+                if not GUI:
+                    an.Close()
+                if not series:
+                    print("  Huygens MTF %s: no DataSeries (%s)"
+                          % (tag, desc_set))
+                    return None
+                x, Y, labels, d = series[0]
+                print("  Huygens MTF %s: %d points to %.0f cycles/mm, "
+                      "%d series %s [%s]  (%.1fs)"
+                      % (tag, x.size, x[-1] if x.size else 0, Y.shape[1],
+                         labels, d, _time.time() - t0))
+                T = Y[:, 0]
+                S = Y[:, 1] if Y.shape[1] > 1 else Y[:, 0]
+                return x, T, S
+
+        section("reference profiles",
+                "RS focal slice from rs/verify_rzmap.npz (ring-midpoint "
+                "quadrature) and the in-script sub-ring quadrature")
+        # --- RS references (rungs 3 and 4) ------------------------------
         rs_rz = rs_mtf = None
         if "run_dir" in design:
             for cand in (os.path.join(design["run_dir"], "rs",
@@ -1266,13 +1964,199 @@ def main():
             if os.path.exists(cand):
                 rs_mtf = np.load(cand)
 
+        # --- fine-quadrature RS focal profile (rungs 3/4) ---------------
+        # run_verify / rs_tiles integrate the RS-I kernel with ONE sample
+        # per ring (ring midpoint quadrature, paper Eq. 4). Across a flat
+        # 2 um ring the kernel phase ramps by Delta*rho/r = 0.2 um of OPL
+        # at the rim -- a half wave at 400 nm -- which the midpoint rule
+        # cannot see: it is the classic staircase quantization loss,
+        # sinc^2(ramp/lam) locally (1.00 on axis, 0.41 at the rim at
+        # 400 nm). POP's cell mean integrates the flat ring against that
+        # ramp, so POP must be judged against the SAME integral. Here:
+        # the identical kernel on a sub-ring grid (RSF_STEP_UM), h(rho)
+        # piecewise constant per ring. Both references are printed; the
+        # midpoint one is the design model's, the fine one the physics.
+        RSF_STEP_UM = 0.125
+        rs_fine = {}
+        rs_h2 = {}
+        rs_h3 = {}
+        rs_h3b = {}
+        rs_h4 = {}
         r_cmp = float(POP_SETTINGS["r_max_um"])
-        print("  lam(um)  peak(x,y)um   FWHM_pop  FWHM_ref   ratio   "
-              "P(3FWHM)/P(grid)   corr_vs_ref")
+        if pop_rung in (3, 4) and "run_dir" in design:
+            try:
+                rho_t, h_t, del_t = load_ring_table(design["run_dir"],
+                                                    file_no)
+                rf = np.arange(0.0, rho_t.size * del_t, RSF_STEP_UM) \
+                    + 0.5 * RSF_STEP_UM
+                hf = h_t[np.minimum((rf / del_t).astype(int),
+                                    rho_t.size - 1)]
+                r0f = np.arange(0.0, max(r_cmp, 30.0) + 5.0, 0.05)
+                # H2 hypothesis (2026-09-07): POP was 8-10 % wider than
+                # the fine reference at 400-750 nm and equal at 1100 nm
+                # -- the signature of the cell-mean transmission being
+                # applied to the AMPLITUDE (|<u>|^2 on E, i.e. squared
+                # apodization: strongest where the local efficiency is
+                # lowest, the short lines) instead of to the irradiance.
+                # Test it by building that field explicitly: cell mean
+                # m(rho) of the residual over Avg cell, then m*|m| as the
+                # pupil function. If POP matches H2, the DLL must hand
+                # POP sqrt of the intensity transmission.
+                cell_um = 1000.0 * float(store.get("avg_cell_mm", 0.0))
+                ideal = np.sqrt(rf * rf + F_um * F_um) - F_um
+                rs_h2 = {}
+
+                def rs_kernel(E0, lam):
+                    k = 2.0 * np.pi / lam
+                    U = np.empty(r0f.size, dtype=complex)
+                    for ir, r0 in enumerate(r0f):
+                        rb = np.sqrt(F_um * F_um + rf * rf + r0 * r0)
+                        U[ir] = (F_um / (1j * lam)) * 2 * np.pi * \
+                            RSF_STEP_UM * np.sum(
+                                E0 * _j0(k * rf * r0 / rb)
+                                * np.exp(1j * k * rb) / rb ** 2 * rf)
+                    return np.abs(U) ** 2
+
+                for lam in wavelengths_um:
+                    k = 2.0 * np.pi / lam
+                    E0 = np.exp(1j * k * (n_resist(lam) - 1.0) * hf)
+                    key_ = int(round(lam * 1000))
+                    rs_fine[key_] = rs_kernel(E0, lam)
+                    if cell_um > 0:
+                        ures = E0 * np.exp(1j * k * ideal)
+                        mbox = int(round(cell_um / RSF_STEP_UM))
+                        cs = np.concatenate([[0.0], np.cumsum(ures)])
+                        idx = np.arange(ures.size)
+                        lo = np.clip(idx - mbox // 2, 0, ures.size)
+                        hi = np.clip(idx + mbox - mbox // 2, 0, ures.size)
+                        m_ = (cs[hi] - cs[lo]) / np.maximum(hi - lo, 1)
+                        rs_h2[key_] = rs_kernel(m_ * np.abs(m_)
+                                                * np.exp(-1j * k * ideal),
+                                                lam)
+                        # H3: POP IGNORES the residual phase (air->air,
+                        # physical OPL of a displaced intercept is zero)
+                        # and applies only the transmission: amplitude
+                        # |m| (T on irradiance) or |m|^2 (T on amplitude)
+                        rs_h3[key_] = rs_kernel(np.abs(m_)
+                                                * np.exp(-1j * k * ideal),
+                                                lam)
+                        rs_h3b[key_] = rs_kernel(np.abs(m_) ** 2
+                                                 * np.exp(-1j * k * ideal),
+                                                 lam)
+                        # H4: cell-mean PHASE only, unit amplitude -- the
+                        # Huygens PSF without polarization (rel_surf_tran
+                        # ignored) should match THIS one
+                        ph_only = m_ / np.maximum(np.abs(m_), 1e-30)
+                        rs_h4[key_] = rs_kernel(ph_only
+                                                * np.exp(-1j * k * ideal),
+                                                lam)
+                store["rsf_r_um"] = r0f
+                for kk, vv in rs_fine.items():
+                    store["rsf_I_%d" % kk] = vv
+                for kk, vv in rs_h2.items():
+                    store["rsh2_I_%d" % kk] = vv
+                for kk, vv in rs_h3.items():
+                    store["rsh3_I_%d" % kk] = vv
+                for kk, vv in rs_h3b.items():
+                    store["rsh3b_I_%d" % kk] = vv
+                for kk, vv in rs_h4.items():
+                    store["rsh4_I_%d" % kk] = vv
+                print("  fine-quadrature RS focal profiles computed "
+                      "(%.3f um sub-ring step, %d lines) -- the "
+                      "staircase-integrated reference" % (RSF_STEP_UM,
+                                                            len(rs_fine)))
+            except Exception as exc:
+                print("  (fine-quadrature RS reference failed: %s)" % exc)
+
+        r_cmp = float(POP_SETTINGS["r_max_um"])
+        # --- dz-gain sweep (huy ... sweep): which multiple of the DLL's
+        # displacement does the Huygens engine turn into phase? ---------
+        if mode == "huy" and any(a.strip().lower() == "sweep" for a in argv[3:]):
+            section("Huygens: dz-gain sweep at the first line",
+                    "Par 9 multiplies the displacement; the gain whose PSF "
+                    "matches the fine reference is the engine's phase factor")
+            lam = wavelengths_um[0]
+            key = int(round(lam * 1000))
+            gains = [0.25, 0.339, 0.4, 0.512, 0.66, 0.8, 1.0, 1.25, 1.5,
+                     1.95, 2.95, -1.0]
+            print("  gain    FWHM   ratio_fine corr_fine  corr_H3(no phase)"
+                  "  corr_H4(phase only)  P(3FWHM)/P   sum")
+            for g in gains:
+                set_par(9, g)
+                res = run_huygens(1, "gain %.3f" % g)
+                if res is None:
+                    continue
+                arr, dx_um, dy_um, desc = res
+                r_um, prof, pk_xy = radial_profile(arr, dx_um,
+                                                   max(r_cmp, 30.0) + 5.0)
+                fw = fwhm_of(r_um, prof)
+                p_grid = float(arr.sum())
+                sel = r_um <= 1.5 * fw if np.isfinite(fw) else r_um < 0
+                p_core = float(2 * np.pi * np.trapezoid(
+                    prof[sel] * r_um[sel], r_um[sel])) if sel.any() else 0.0
+                eff = p_core / max(p_grid * dx_um * dy_um, 1e-30)
+
+                def _c(dct):
+                    if key not in dct:
+                        return float("nan"), float("nan")
+                    I_ = dct[key]
+                    p_ = np.interp(store["rsf_r_um"], r_um, prof)
+                    c_ = float(np.corrcoef(p_ / p_.max(),
+                                           I_ / I_.max())[0, 1])
+                    return fwhm_of(store["rsf_r_um"], I_), c_
+                ff, cf = _c(rs_fine)
+                _, c3 = _c(rs_h3)
+                _, c4 = _c(rs_h4)
+                print("  %6.3f  %5.2f   %6.3f    %.4f     %.4f            "
+                      "%.4f              %.3f    %.4g"
+                      % (g, fw, fw / ff if ff > 0 else float("nan"), cf,
+                         c3, c4, eff, np.nansum(arr)))
+            set_par(9, 1.0)
+            print("  read: the gain with the highest corr_fine and "
+                  "ratio_fine ~1 is the factor the engine applies to dz; "
+                  "gain -1 tests the sign")
+            TheSystem.SaveAs(os.path.join(out_dir, zos_name))
+            del zos
+            return
+
+        section("%s propagation per wavelength" % ENGINE,
+                "one %s run per line to the image plane; radial PSF, "
+                "FWHM and correlation against the references"
+                % ("POP" if mode == "pop" else "Huygens PSF (+ Huygens MTF)"))
+        print("  lam(um)  peak(x,y)um   FWHM_pop  FWHM_rs(mid)  ratio   "
+              "FWHM_rs(fine)  ratio   corr_mid  corr_fine  P(3FWHM)/P   "
+              "| H2: FWHM  ratio  corr | H3 no-phase |m|: FWHM ratio corr "
+              "| |m|^2: FWHM ratio corr | H4 phase-only: FWHM ratio corr")
         results = []
+        # DLL debug log (Par 8): armed here so the first 400 DLL calls
+        # captured are POP's evaluation of the residual surface at the
+        # first line -- what OpticStudio passes (type, lam, n1, n2, ray)
+        # and what the DLL answered. Read back and summarised after the
+        # loop (section 10).
+        dll_log = os.path.join(os.path.expanduser("~"), "Documents",
+                               "Zemax", "DLL", "Surfaces",
+                               "us_mdl_rings_log.txt")
+        if surf_par is not None:
+            try:
+                if os.path.exists(dll_log):
+                    os.remove(dll_log)
+                set_par(8, 1.0)
+            except Exception as exc:
+                print("  (DLL debug log not armed: %s)" % exc)
         for wi, lam in enumerate(wavelengths_um, start=1):
             key = int(round(lam * 1000))
-            res = run_pop(wi, end_surf, "lam=%.2f um" % lam)
+            subsection("lam = %.2f um (wavelength #%d of %d)"
+                       % (lam, wi, len(wavelengths_um)))
+            if mode == "huy":
+                res = run_huygens(wi, "lam=%.2f um" % lam)
+                hmtf = run_huygens_mtf(wi, "lam=%.2f um" % lam)
+                if hmtf is not None:
+                    store["HMTF_f_%d" % key] = hmtf[0]
+                    store["HMTF_T_%d" % key] = hmtf[1]
+                    store["HMTF_S_%d" % key] = hmtf[2]
+            else:
+                res = run_pop(wi, end_surf, "lam=%.2f um" % lam)
+                hmtf = None
             if res is None:
                 continue
             arr, dx_um, dy_um, desc = res
@@ -1294,13 +2178,21 @@ def main():
             corr = float("nan")
             fwhm_ref = fwhm_airy
             ref_r = ref_I = None
-            if pop_rung == 3 and rs_rz is not None and \
+            if pop_rung in (3, 4) and rs_rz is not None and \
                     "I_%d" % key in rs_rz.files:
                 zg = rs_rz["zgrid"]
                 izF = int(np.argmin(np.abs(zg - F_um)))
                 ref_r = rs_rz["r0grid"]
                 ref_I = rs_rz["I_%d" % key][izF, :]
                 fwhm_ref = fwhm_of(ref_r, ref_I)
+                if not np.isfinite(fwhm_ref):
+                    jr = int(np.argmax(ref_I))
+                    print("  (RS focal slice at %.2f um has no on-axis "
+                          "half crossing: I(0)/Imax = %.3f, peak at "
+                          "r = %.2f um -- annular/defocused at z = F; "
+                          "rz peak plane differs)"
+                          % (lam, ref_I[0] / max(ref_I.max(), 1e-30),
+                             ref_r[jr]))
                 pi_ = np.interp(ref_r, r_um, prof)
                 if pi_.max() > 0 and ref_I.max() > 0:
                     corr = float(np.corrcoef(pi_ / pi_.max(),
@@ -1316,10 +2208,54 @@ def main():
             ratio = fwhm_pop / fwhm_ref if (np.isfinite(fwhm_pop) and
                                             np.isfinite(fwhm_ref) and
                                             fwhm_ref > 0) else float("nan")
-            print("  %.3f    (%+.1f,%+.1f)    %6.2f    %6.2f    %5.3f     "
-                  "%6.3f            %.4f"
+            # fine-quadrature (staircase-integrated) RS reference
+            fwhm_fine = corr_fine = ratio_fine = float("nan")
+            fine_r = fine_I = None
+            if key in rs_fine:
+                fine_r = store["rsf_r_um"]
+                fine_I = rs_fine[key]
+                fwhm_fine = fwhm_of(fine_r, fine_I)
+                pf_ = np.interp(fine_r, r_um, prof)
+                if pf_.max() > 0 and fine_I.max() > 0:
+                    corr_fine = float(np.corrcoef(
+                        pf_ / pf_.max(), fine_I / fine_I.max())[0, 1])
+                if np.isfinite(fwhm_pop) and np.isfinite(fwhm_fine) \
+                        and fwhm_fine > 0:
+                    ratio_fine = fwhm_pop / fwhm_fine
+            fwhm_h2 = corr_h2 = ratio_h2 = float("nan")
+            if key in rs_h2:
+                h2_I = rs_h2[key]
+                fwhm_h2 = fwhm_of(store["rsf_r_um"], h2_I)
+                ph_ = np.interp(store["rsf_r_um"], r_um, prof)
+                if ph_.max() > 0 and h2_I.max() > 0:
+                    corr_h2 = float(np.corrcoef(
+                        ph_ / ph_.max(), h2_I / h2_I.max())[0, 1])
+                if np.isfinite(fwhm_pop) and np.isfinite(fwhm_h2) \
+                        and fwhm_h2 > 0:
+                    ratio_h2 = fwhm_pop / fwhm_h2
+            def _cmp(dct):
+                if key not in dct:
+                    return float("nan"), float("nan"), float("nan")
+                I_ = dct[key]
+                f_ = fwhm_of(store["rsf_r_um"], I_)
+                p_ = np.interp(store["rsf_r_um"], r_um, prof)
+                c_ = float(np.corrcoef(p_ / p_.max(), I_ / I_.max())[0, 1]) \
+                    if p_.max() > 0 and I_.max() > 0 else float("nan")
+                r_ = fwhm_pop / f_ if (np.isfinite(fwhm_pop) and
+                                      np.isfinite(f_) and f_ > 0) \
+                    else float("nan")
+                return f_, r_, c_
+            f3, r3, c3 = _cmp(rs_h3)
+            f3b, r3b, c3b = _cmp(rs_h3b)
+            f4, r4, c4 = _cmp(rs_h4)
+            print("  %.3f    (%+.1f,%+.1f)    %6.2f    %6.2f       %5.3f   "
+                  "%6.2f         %5.3f   %.4f    %.4f    %.3f      "
+                  "| %6.2f  %5.3f  %.4f | %6.2f %5.3f %.4f | %6.2f %5.3f %.4f "
+                  "| %6.2f %5.3f %.4f"
                   % (lam, pk_xy[0], pk_xy[1], fwhm_pop, fwhm_ref, ratio,
-                     eff_grid, corr))
+                     fwhm_fine, ratio_fine, corr, corr_fine, eff_grid,
+                     fwhm_h2, ratio_h2, corr_h2, f3, r3, c3, f3b, r3b, c3b,
+                     f4, r4, c4))
             # MTF from the POP profile on the RS frequency grid
             mtf_pop = None
             if rs_mtf is not None:
@@ -1338,7 +2274,8 @@ def main():
             store["dx_um_%d" % key] = dx_um
             store["r_um_%d" % key] = r_um
             store["prof_%d" % key] = prof
-            results.append((lam, fwhm_pop, fwhm_ref, eff_grid, corr))
+            results.append((lam, fwhm_pop, fwhm_ref, eff_grid, corr,
+                            fwhm_fine, corr_fine, f4, c4))
             np.savez_compressed(npz_path, **store)
 
             # --- figure: radial PSF + MTF -----------------------------
@@ -1348,14 +2285,22 @@ def main():
                 import matplotlib.pyplot as plt
                 fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.2))
                 a1.plot(r_um, prof / max(prof.max(), 1e-30), color="k",
-                        lw=2, label="POP rung %d (%s)" % (pop_rung,
-                                                          variant))
+                        lw=2, label=("POP rung %d (%s)" % (pop_rung, variant)
+                                     if mode == "pop" else
+                                     "Huygens PSF (hybrid, %d^2 pupil)"
+                                     % huy_samp))
                 if ref_r is not None:
                     a1.plot(ref_r, ref_I / max(ref_I.max(), 1e-30),
                             color="#e6550d", lw=1.6, ls="--",
-                            label=("RS focal slice" if pop_rung == 3
+                            label=("RS focal slice (ring midpoint)"
+                                   if pop_rung in (3, 4)
                                    and rs_rz is not None else
                                    "Airy (analytic)"))
+                if fine_r is not None:
+                    a1.plot(fine_r, fine_I / max(fine_I.max(), 1e-30),
+                            color="#3182bd", lw=1.4, ls=":",
+                            label="RS, sub-ring quadrature (%.3f um)"
+                                  % RSF_STEP_UM)
                 a1.set_xlim(0, r_cmp)
                 a1.set_xlabel("r (um)")
                 a1.set_ylabel("I / peak")
@@ -1367,7 +2312,10 @@ def main():
                 if mtf_pop is not None:
                     fl = rs_mtf["f_lppmm"]
                     a2.plot(fl, mtf_pop, color="k", lw=2,
-                            label="POP")
+                            label="%s PSF -> Hankel MTF" % ENGINE)
+                    if hmtf is not None:
+                        a2.plot(hmtf[0], hmtf[1], color="#31a354", lw=1.4,
+                                label="Zemax Huygens MTF (tangential)")
                     if "MTF_%d" % key in rs_mtf.files:
                         a2.plot(fl, rs_mtf["MTF_%d" % key],
                                 color="#e6550d", lw=1.6, ls="--",
@@ -1389,18 +2337,79 @@ def main():
                             "(run 02_validation_rs\\mtf_verify.py)",
                             ha="center", va="center",
                             transform=a2.transAxes)
-                fig.suptitle("POP ladder rung %d -- %s surface, grid %d^2 "
-                             "(%.2f um/sample)" % (pop_rung, variant,
-                                                    pop_samp, dx_um),
+                fig.suptitle(("POP ladder rung %d -- %s surface, grid %d^2 "
+                              "(%.2f um/sample)" % (pop_rung, variant,
+                                                     pop_samp, dx_um))
+                             if mode == "pop" else
+                             ("Huygens PSF on the hybrid (Paraxial + "
+                              "cell-averaged residual), pupil %d^2, image "
+                              "%.2f um/sample" % (huy_samp, dx_um)),
                              fontsize=10)
                 fig.tight_layout()
                 fig.savefig(os.path.join(
-                    out_dir, "fig_zemax_pop_r%d_%d.png" % (pop_rung, key)),
+                    out_dir, ("fig_zemax_pop_r%d_%d.png" % (pop_rung, key))
+                    if mode == "pop" else "fig_zemax_huygens_%d.png" % key),
                     dpi=140)
                 plt.close(fig)
             except Exception as exc:
                 print("  (figure failed: %s)" % exc)
 
+        if surf_par is not None:
+            section("DLL debug log: what %s passed to the residual surface"
+                    % ENGINE,
+                    "first 400 DLL calls after arming (Par 8); type, "
+                    "wavelength, indices, ray geometry, returned dz")
+            try:
+                set_par(8, 0.0)
+                rows = []
+                with open(dll_log) as fh:
+                    for ln in fh:
+                        if ln.startswith("#") or not ln.strip():
+                            continue
+                        parts = ln.split()
+                        rows.append(parts)
+                if not rows:
+                    print("  log is EMPTY: the DLL was not called by POP "
+                          "after arming (or the file is elsewhere)")
+                else:
+                    from collections import Counter
+                    kinds = Counter((r[1], r[-1]) for r in rows)
+                    print("  %d calls logged: %s" % (
+                        len(rows), ", ".join("type %s/%s x%d" % (k[0], k[1], v)
+                                             for k, v in kinds.items())))
+                    lams = sorted(set(float(r[5]) for r in rows))
+                    n1s = sorted(set(round(float(r[6]), 5) for r in rows))
+                    n2s = sorted(set(round(float(r[7]), 5) for r in rows))
+                    print("  wavelength(s) passed: %s | n1: %s | n2: %s"
+                          % (", ".join("%.4f" % v for v in lams[:6]),
+                             ", ".join("%.5f" % v for v in n1s[:6]),
+                             ", ".join("%.5f" % v for v in n2s[:6])))
+                    tr = [r for r in rows if r[-1] == "trace"]
+                    if tr:
+                        xs = np.array([float(r[8]) for r in tr])
+                        ys = np.array([float(r[9]) for r in tr])
+                        zs = np.array([float(r[10]) for r in tr])
+                        ns = np.array([float(r[13]) for r in tr])
+                        dzs = np.array([float(r[14]) for r in tr])
+                        trs = np.array([float(r[15]) for r in tr])
+                        rho = np.hypot(xs, ys)
+                        print("  trace calls: rho %.4f..%.4f mm, incoming "
+                              "z %.2e..%.2e, cos(n) %.5f..%.5f, returned "
+                              "dz %.3e..%.3e mm, tran %.3f..%.3f"
+                              % (rho.min(), rho.max(), zs.min(), zs.max(),
+                                 ns.min(), ns.max(), dzs.min(), dzs.max(),
+                                 trs.min(), trs.max()))
+                    print("  first lines (call type numb surf wave lam n1 "
+                          "n2 x y z l m n dz tran p1..p7 what):")
+                    for r in rows[:8]:
+                        print("    " + " ".join(r))
+                    store["dll_log_rows"] = np.array(
+                        [" ".join(r) for r in rows])
+            except Exception as exc:
+                print("  (DLL log not readable: %s)" % exc)
+
+        section("results and verdict",
+                "npz + figures written; the rung's pass/fail statement")
         print("saved %s" % npz_path)
         # --- verdict per rung ------------------------------------------
         if results:
@@ -1431,18 +2440,73 @@ def main():
                          "TRANSFERS" if ratios and
                          max(abs(x - 1) for x in ratios) < 0.15
                          else "does NOT yet reproduce"))
-            else:
+            elif pop_rung == 3:
                 print("  RUNG 3 verdict: FWHM POP/RS %s, corr vs RS focal "
                       "slice %s -> %s"
                       % (", ".join("%.3f" % x for x in ratios),
                          ", ".join("%.4f" % x for x in corrs),
                          "POP reproduces the RS focal PSF on the zone "
                          "surface" if corrs and min(corrs) > 0.98 else
-                         "MISMATCH: suspect the pilot-beam regime "
-                         "(collimated after a phase-only surface) or "
-                         "the fixed-grid resolution -- try samp 8192, "
-                         "POP_SETTINGS['angular_spectrum'], or the od+"
-                         "residual hybrid"))
+                         "MISMATCH (expected for the point-sampled zone "
+                         "surface: pilot beam collimated + fold aliasing) "
+                         "-- run 'pop 4' (Paraxial + cell-averaged "
+                         "residual)"))
+            elif mode == "huy":
+                # without polarization Zemax ignores rel_surf_tran: judge
+                # against the phase-only reference (H4); with it, against
+                # the full fine reference
+                pol = bool(HUY_SETTINGS["use_polarization"])
+                i_f, i_c = (5, 6) if pol else (7, 8)
+                ratios_f = [r[1] / r[i_f] for r in results
+                            if np.isfinite(r[1]) and np.isfinite(r[i_f])
+                            and r[i_f] > 0]
+                corrs_f = [r[i_c] for r in results if np.isfinite(r[i_c])]
+                good = corrs_f and min(corrs_f) > 0.98 and ratios_f and \
+                    max(abs(x - 1) for x in ratios_f) < 0.1
+                print("  HUYGENS verdict (hybrid: Paraxial f=F + residual "
+                      "UDS, Avg cell %.4f mm = pupil pitch) against the "
+                      "%s RS reference: FWHM Huygens/RS %s, "
+                      "corr %s -> %s"
+                      % (store.get("avg_cell_mm", 0.0),
+                         "FINE-quadrature (phase + transmission)" if pol
+                         else "PHASE-ONLY cell-mean (polarization off: "
+                              "rel_surf_tran ignored)",
+                         ", ".join("%.3f" % x for x in ratios_f),
+                         ", ".join("%.4f" % x for x in corrs_f),
+                         "the Huygens PSF reproduces the RS focal PSF: "
+                         "Zemax's native Huygens PSF/MTF on this .zos is "
+                         "the colleagues' instrument" if good else
+                         "MISMATCH: check the settings echo (pupil/image "
+                         "sampling, image delta accepted?), the DLL log "
+                         "(one ray per pupil sample?) and the transmission "
+                         "(UsePolarization)"))
+            else:
+                ratios_f = [r[1] / r[5] for r in results
+                            if np.isfinite(r[1]) and np.isfinite(r[5])
+                            and r[5] > 0]
+                corrs_f = [r[6] for r in results if np.isfinite(r[6])]
+                if ratios_f:
+                    ratios, corrs = ratios_f, corrs_f
+                good = corrs and min(corrs) > 0.98 and ratios and \
+                    max(abs(x - 1) for x in ratios) < 0.1
+                print("  RUNG 4 verdict (hybrid: Paraxial f=F + residual "
+                      "UDS, Avg cell %.4f mm) against the %s RS "
+                      "reference: FWHM POP/RS %s, corr %s -> %s"
+                      % (store.get("avg_cell_mm", 0.0),
+                         "FINE-quadrature (staircase-integrated)"
+                         if ratios_f else "ring-midpoint",
+                         ", ".join("%.3f" % x for x in ratios),
+                         ", ".join("%.4f" % x for x in corrs),
+                         "POP reproduces the RS focal PSF: the MDL is "
+                         "modelled in OpticStudio (save the .zos for the "
+                         "colleagues; POP + this DLL is their instrument)"
+                         if good else
+                         "MISMATCH: read the grid echo (was the pitch at "
+                         "surface 3 the Avg cell value? was the re-sample "
+                         "honoured?), then check the RS focal slice "
+                         "window and the launch disc; if the PSF equals "
+                         "the Airy pattern exactly, POP ignored the UDS "
+                         "phase (rel_surf_tran plateau tells)"))
         TheSystem.SaveAs(os.path.join(out_dir, zos_name))
         print("re-saved system -> %s%s" % (
             zos_name, "  (POP window left open in the GUI and saved with "
@@ -1496,6 +2560,9 @@ def main():
         return
 
     if mode == "rz":
+        section("rz: batch-OPD trace per wavelength -> I(r,z) tiles",
+                "one ray per ring through the DLL, OPD self-check against "
+                "the ring table, RS-I propagation of the Zemax field")
         # --------------------------------------------------------------
         # BATCH-OPD ROUTE -> I(r, z) tiles from the ZEMAX-TRACED field.
         #
@@ -1623,6 +2690,9 @@ def main():
                 break
         if rs_npz is not None:
             rs = np.load(rs_npz)
+            section("rz: Zemax field vs RS tiles",
+                    "peak plane and Pearson correlation per line; "
+                    "1.0000 = identical structure")
             print("Zemax-field vs RS tiles (%s):" % rs_npz)
             print("  lam(nm)  z_pk_zemax  z_pk_rs   dz(um)   corr")
             for lam in wavelengths_um:

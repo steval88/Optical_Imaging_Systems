@@ -63,6 +63,19 @@
                            (flips the sign of the injected phase)
      Par 4 : Parax f       paraxial focal length in lens units
                            (0 = treat as plane parallel plate)
+     Par 5 : Sub ideal     1 = inject only the RESIDUAL design-minus-
+                           ideal-lens phase (zero paraxial power); the
+                           focusing then comes from a separate Paraxial
+                           surface (POP hybrid, 2026-09-07)
+     Par 6 : Avg cell      POP grid pitch [mm]; > 0 (with Sub ideal = 1)
+                           replaces the point sample of the residual by
+                           its cell mean (phase = arg<u>, transmission =
+                           |<u>|^2). POP ONLY -- 0 for ray analyses.
+     Par 7 : OPD law       0 = intercept displacement read by the batch
+                           trace as +n2*z (calibrated 2026-08-31; rz);
+                           1 = PHYSICAL path (n1-n2)*z for POP, which
+                           ignores the bookkeeping (measured 2026-09-07):
+                           needs a real index step at the surface
 
  Build (Visual Studio):
      cl /LD /O2 us_mdl_rings.cpp /Fe:us_mdl_rings.dll
@@ -137,6 +150,59 @@ struct RingTable {
 #define MAX_TABLES 8
 static RingTable g_tab[MAX_TABLES];
 
+/* cell-average cache (defined below, initialised in DllMain) */
+#define MAX_AVG 16
+struct AvgCache {
+    int     file_id;                        /* -1 = empty              */
+    double  lam, c, F, scale, zsign;        /* key                     */
+    int     n;                              /* fine samples            */
+    double *sre, *sim;                      /* prefix sums, length n+1 */
+    double  rmax;                           /* lens radius [mm]        */
+    volatile int ready;
+};
+static AvgCache g_avg[MAX_AVG];
+static int      g_avg_next = 0;
+
+/* Par 8 "Debug log" > 0: append the first LOG_MAX calls (any type) to
+   us_mdl_rings_log.txt next to the DLL -- what OpticStudio actually
+   passes (type, wavelength, n1, n2, ray position/direction, params)
+   and what the DLL returned. Added 2026-09-07 to learn how POP
+   evaluates a User Defined Surface instead of guessing. */
+#define LOG_MAX 400
+static int  g_log_count = 0;
+static void log_call(const FIXED_DATA3 *FD, const USER_DATA *UD,
+                     double dz, double tran, const char *what)
+{
+    if (FD->param[8] < 0.5 || g_log_count >= LOG_MAX) return;
+    EnterCriticalSection(&g_cs);
+    if (g_log_count < LOG_MAX) {
+        char path[MAX_PATH];
+        GetModuleFileNameA(g_hModule, path, MAX_PATH);
+        char *slash = strrchr(path, '\\');
+        if (!slash) slash = strrchr(path, '/');
+        if (slash) *(slash + 1) = '\0'; else path[0] = '\0';
+        char fname[MAX_PATH];
+        snprintf(fname, MAX_PATH, "%sus_mdl_rings_log.txt", path);
+        FILE *fp = fopen(fname, g_log_count == 0 ? "wt" : "at");
+        if (fp) {
+            if (g_log_count == 0)
+                fprintf(fp, "# call type numb surf wave lam n1 n2 x y z "
+                            "l m n dz tran p1 p2 p3 p4 p5 p6 p7 what\n");
+            fprintf(fp, "%d %d %d %d %d %.6f %.6f %.6f %.6f %.6f %.6f "
+                        "%.6f %.6f %.6f %.6e %.6f %g %g %g %g %g %g %g "
+                        "%s\n",
+                    g_log_count, FD->type, FD->numb, FD->surf, FD->wave,
+                    FD->wavelength, FD->n1, FD->n2, UD->x, UD->y, UD->z,
+                    UD->l, UD->m, UD->n, dz, tran, FD->param[1],
+                    FD->param[2], FD->param[3], FD->param[4],
+                    FD->param[5], FD->param[6], FD->param[7], what);
+            fclose(fp);
+        }
+        g_log_count++;
+    }
+    LeaveCriticalSection(&g_cs);
+}
+
 BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -146,9 +212,14 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID)
             g_tab[i].file_id = -1; g_tab[i].h = NULL;
             g_tab[i].n = 0; g_tab[i].delta = 0.0;
         }
+        for (int i = 0; i < MAX_AVG; ++i) {
+            g_avg[i].file_id = -1; g_avg[i].ready = 0;
+            g_avg[i].sre = g_avg[i].sim = NULL; g_avg[i].n = 0;
+        }
     }
     if (reason == DLL_PROCESS_DETACH) {
         for (int i = 0; i < MAX_TABLES; ++i) free(g_tab[i].h);
+        for (int i = 0; i < MAX_AVG; ++i) { free(g_avg[i].sre); free(g_avg[i].sim); }
         if (g_cs_init) { DeleteCriticalSection(&g_cs); g_cs_init = 0; }
     }
     return TRUE;
@@ -218,6 +289,103 @@ static double stair_sag(const RingTable *t, double rho,
     return zsign * scale * t->h[i];
 }
 
+/* ------------------------------------------------------------------ */
+/* CELL-AVERAGED RESIDUAL (Par 6 "Avg cell", 2026-09-07) -- POP only  */
+/*                                                                    */
+/* POP samples a surface ONCE per grid cell (pitch c = 12-142 um on   */
+/* a 4096^2 grid). The residual design-minus-ideal phase changes on   */
+/* the ring (2 um) and fold (46 um at the rim) scales, so a point     */
+/* sample per cell ALIASES the fold structure into the focal window   */
+/* (radial model, synthetic s3-like lens, 2026-09-07: corr vs the     */
+/* full-resolution PSF 0.67 at c = 141.8 um, 0.99 at 11.7 um), while  */
+/* the CELL MEAN of the complex transmission                          */
+/*                                                                    */
+/*     <u>(rho) = (1/c) Int_{rho-c/2}^{rho+c/2} exp(i k phi_res) drho */
+/*                                                                    */
+/* reproduces it (corr 1.0000 at every c tested, 141.8 / 11.7 /       */
+/* 2.9 um). Physics: light diffracted by structure finer than the     */
+/* cell lands at |r| > lam F / (2c) (>= 108 um at c = 141.8 um) --    */
+/* outside the +-30 um window -- and a POP grid cannot carry it       */
+/* anyway; the cell mean keeps exactly the part of the field that     */
+/* reaches the window (the local order-efficiency phasor: |<u>|^2 is  */
+/* the local efficiency, arg<u> the local phase error). Applied as    */
+/*     phase   : arg<u>  -> intercept displacement (OPD law +n2*z)    */
+/*     |<u>|^2 : UD->rel_surf_tran (POP applies it to the irradiance, */
+/*               measured 2026-09-04 on the od DLL: plateau 0.85)     */
+/* Only active with Sub ideal = 1 and Avg cell > 0. The mean is a     */
+/* 1-D box in rho (the POP cell is a square of side c; the radial box */
+/* is the model that was validated). Ray-based analyses must keep     */
+/* Avg cell = 0.                                                      */
+/*                                                                    */
+/* Cache: one fine radial grid (step AVG_DR) of prefix sums of        */
+/* exp(i k phi_res) per (file, lam, c, F, scale, zsign); POP calls    */
+/* the DLL once per grid point, so the query must be O(1).            */
+/* ------------------------------------------------------------------ */
+static const double AVG_DR = 1.25e-4;      /* mm = 0.125 um (16/ring) */
+
+static AvgCache *get_avg(const RingTable *t, int file_id, double lam,
+                         double c, double F, double scale, double zsign)
+{
+    for (int i = 0; i < MAX_AVG; ++i) {
+        AvgCache *a = &g_avg[i];
+        if (a->ready && a->file_id == file_id && a->lam == lam &&
+            a->c == c && a->F == F && a->scale == scale &&
+            a->zsign == zsign) return a;
+    }
+    EnterCriticalSection(&g_cs);
+    for (int i = 0; i < MAX_AVG; ++i) {        /* re-check under lock  */
+        AvgCache *a = &g_avg[i];
+        if (a->ready && a->file_id == file_id && a->lam == lam &&
+            a->c == c && a->F == F && a->scale == scale &&
+            a->zsign == zsign) { LeaveCriticalSection(&g_cs); return a; }
+    }
+    AvgCache *a = &g_avg[g_avg_next];
+    g_avg_next = (g_avg_next + 1) % MAX_AVG;
+    a->ready = 0;
+    free(a->sre); free(a->sim); a->sre = a->sim = NULL;
+    double rmax = t->n * t->delta;
+    int n = (int)(rmax / AVG_DR) + 1;
+    double *sre = (double *)malloc(sizeof(double) * (n + 1));
+    double *sim = (double *)malloc(sizeof(double) * (n + 1));
+    if (!sre || !sim) { free(sre); free(sim);
+                        LeaveCriticalSection(&g_cs); return NULL; }
+    double nl = n_resist(lam);
+    double k  = 2.0 * 3.14159265358979323846 / (lam * 1.0e-3); /* rad/mm */
+    sre[0] = sim[0] = 0.0;
+    for (int j = 0; j < n; ++j) {
+        double rho = (j + 0.5) * AVG_DR;
+        int i = (int)(rho / t->delta);
+        double h = (i >= 0 && i < t->n) ? t->h[i] : 0.0;
+        double opl = (nl - 1.0) * h + sqrt(rho * rho + F * F) - F;
+        double ph = k * zsign * scale * opl;
+        sre[j + 1] = sre[j] + cos(ph);
+        sim[j + 1] = sim[j] + sin(ph);
+    }
+    a->file_id = file_id; a->lam = lam; a->c = c; a->F = F;
+    a->scale = scale; a->zsign = zsign; a->n = n; a->rmax = rmax;
+    a->sre = sre; a->sim = sim;
+    a->ready = 1;
+    LeaveCriticalSection(&g_cs);
+    return a;
+}
+
+/* mean of exp(i phi_res) over [rho-c/2, rho+c/2] clipped to the lens */
+static void avg_phasor(const AvgCache *a, double rho, double *re, double *im)
+{
+    double lo = rho - 0.5 * a->c, hi = rho + 0.5 * a->c;
+    if (lo < 0.0) lo = 0.0;
+    if (hi > a->rmax) hi = a->rmax;
+    int jlo = (int)(lo / AVG_DR), jhi = (int)(hi / AVG_DR);
+    if (jlo < 0) jlo = 0;
+    if (jhi > a->n) jhi = a->n;
+    if (jhi <= jlo) {                      /* cell entirely outside    */
+        *re = 1.0; *im = 0.0; return;
+    }
+    double cnt = (double)(jhi - jlo);
+    *re = (a->sre[jhi] - a->sre[jlo]) / cnt;
+    *im = (a->sim[jhi] - a->sim[jlo]) / cnt;
+}
+
 /* classic Snell refraction from us_stand.c; returns -1 on TIR */
 static int Refract(double thisn, double nextn, double *l, double *m,
                    double *n, double ln, double mn, double nn)
@@ -237,6 +405,85 @@ static int Refract(double thisn, double nextn, double *l, double *m,
         (*n) = (nr * (*n)) + (gamma * nn);
     }
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Intercept displacement dz(rho) [mm] and surface transmission for   */
+/* the ray trace (case 5) -- and, with Sub ideal = 1, ALSO the sag     */
+/* reported by case 3, so that an engine evaluating the SAG (rather    */
+/* than the traced intercept) sees the same physical surface: a relief */
+/* of height dz between media n1 / n2 whose path difference            */
+/* (n1 - n2) dz is the residual OPL. Added 2026-09-07 after POP, with  */
+/* the physical law and an index step, still returned neither the     */
+/* phased nor the phase-free PSF (peak off-axis at 550 nm) -- which    */
+/* route POP takes is unknown; making both routes agree removes the   */
+/* question.                                                          */
+/* ------------------------------------------------------------------ */
+static double intercept_dz(const RingTable *t, const FIXED_DATA3 *FD,
+                           double rho, double *tran)
+{
+    double scale = FD->param[2];
+    double zsign = FD->param[3];
+    int i = (int)(rho / t->delta);
+    double h = (i >= 0 && i < t->n) ? t->h[i] : 0.0;   /* mm      */
+    *tran = 1.0;
+
+    /* Par 7 (OPD law, 2026-09-07). MEASURED: POP derives the phase of a
+       User Defined Surface from the PHYSICAL optical path, not from the
+       batch-trace bookkeeping (+n2*z) calibrated on 2026-08-31: with
+       air on both sides a displaced intercept adds no path and POP
+       rung 4 in point mode returned an exact Airy pattern (FWHM/Airy
+       1.002-1.006) -- the residual phase was silently ZERO; only
+       rel_surf_tran got through. Law 1 places the surface between two
+       DIFFERENT media and displaces the intercept by dz = OPL/(n1-n2)
+       so the physical path difference IS the design OPL, whatever
+       glass carries it. Law 0 keeps the calibrated law for rz.       */
+    double law_den = FD->n2;
+    if (FD->param[7] > 0.5 && fabs(FD->n1 - FD->n2) > 1.0e-9)
+        law_den = FD->n1 - FD->n2;
+    if (law_den == 0.0) return 0.0;
+
+    double nl = n_resist(FD->wavelength);   /* lam in um      */
+    /* SIGN: OPD law is +n2*z (calibrated to 1.7e-11 um against the
+       canonical table, 2026-08-31)                                   */
+    double opl = (nl - 1.0) * h;                /* design OPL [mm] */
+    /* Par 5 (Sub ideal, 2026-09-07): subtract the PERFECT-lens OPL
+       -(sqrt(rho^2+F^2) - F), F = Par 4, so the injected phase is the
+       RESIDUAL design - ideal = k*(P lam0) + quantization error: flat
+       within a fold, jumps only at the folds. Used by the POP hybrid
+       (Paraxial surface f=F + this surface): POP's pilot beam is built
+       from REAL rays and a phase-only surface leaves it collimated
+       (measured 2026-09-04), so the focusing must come from a
+       ray-bending surface while the diffractive structure rides here. */
+    if (FD->param[5] > 0.5 && FD->param[4] != 0.0) {
+        double F = FD->param[4];
+        opl += sqrt(rho * rho + F * F) - F;     /* - OPL_ideal   */
+    }
+    double dz = zsign * scale * opl / law_den;
+    /* Par 6 (Avg cell > 0, with Sub ideal): replace the point sample
+       by the CELL MEAN of exp(i k phi_res) -- phase from arg<u>, local
+       efficiency |<u>|^2 as the surface transmission (AvgCache above) */
+    if (FD->param[5] > 0.5 && FD->param[4] != 0.0 &&
+        FD->param[6] > 0.0 && FD->wavelength > 0.0) {
+        AvgCache *a = get_avg(t, (int)(FD->param[1] + 0.5),
+                              FD->wavelength, FD->param[6],
+                              FD->param[4], scale, zsign);
+        if (a) {
+            double re, im;
+            avg_phasor(a, rho, &re, &im);
+            double lam_mm = FD->wavelength * 1.0e-3;
+            double ph = atan2(im, re);          /* (-pi, pi]   */
+            dz = ph / (2.0 * 3.14159265358979323846) * lam_mm / law_den;
+            *tran = re * re + im * im;
+        }
+    }
+    /* Par 9 (dz gain, 2026-09-07): multiplies the FINAL displacement.
+       Diagnostic: the wave engines (POP, Huygens) apply a phase
+       proportional to dz with a factor that is neither the batch-trace
+       bookkeeping (n2) nor the physical path (n1-n2) -- a gain sweep
+       identifies the factor empirically. Default 1 (no effect).      */
+    if (FD->param[9] != 0.0) dz *= FD->param[9];
+    return dz;
 }
 
 extern "C" {
@@ -281,6 +528,11 @@ UserDefinedSurface3(USER_DATA *UD, FIXED_DATA3 *FD)
         case 2: strcpy(UD->string, "Height scale"); break;
         case 3: strcpy(UD->string, "Z sign");       break;
         case 4: strcpy(UD->string, "Parax f");      break;
+        case 5: strcpy(UD->string, "Sub ideal");    break;
+        case 6: strcpy(UD->string, "Avg cell");     break;
+        case 7: strcpy(UD->string, "OPD law");      break;
+        case 8: strcpy(UD->string, "Debug log");    break;
+        case 9: strcpy(UD->string, "dz gain");      break;
         default: UD->string[0] = '\0';              break;
         }
         break;
@@ -298,15 +550,27 @@ UserDefinedSurface3(USER_DATA *UD, FIXED_DATA3 *FD)
         RingTable *t = get_table((int)(FD->param[1] + 0.5));
         if (t) {
             double rho = sqrt(UD->x * UD->x + UD->y * UD->y);
-            UD->sag1 = stair_sag(t, rho, FD->param[2], FD->param[3]);
+            if (FD->param[5] > 0.5) {
+                /* residual mode: the sag IS the traced intercept, so a
+                   sag-evaluating engine and the ray trace agree */
+                double tran;
+                UD->sag1 = intercept_dz(t, FD, rho, &tran);
+            } else {
+                UD->sag1 = stair_sag(t, rho, FD->param[2], FD->param[3]);
+            }
             UD->sag2 = UD->sag1;
+            log_call(FD, UD, UD->sag1, 1.0, "sag");
         }
         break; }
 
     case 4: {
         /* paraxial ray trace: thin element of power 1/f_par (0 = flat) */
         double power = 0.0;
-        if (FD->param[4] != 0.0) power = 1.0 / FD->param[4];
+        if (FD->param[4] != 0.0 && FD->param[5] < 0.5)
+            power = 1.0 / FD->param[4];
+        /* Par 5 (Sub ideal) = 1: the surface carries only the RESIDUAL
+           design-minus-ideal phase -> zero paraxial power (a separate
+           Paraxial surface supplies the focusing in the POP hybrid) */
         if (UD->n != 0.0) {
             UD->l = UD->l / UD->n;
             UD->m = UD->m / UD->n;
@@ -317,6 +581,7 @@ UserDefinedSurface3(USER_DATA *UD, FIXED_DATA3 *FD)
             UD->m *= UD->n;
         }
         UD->ln = 0.0; UD->mn = 0.0; UD->nn = -1.0;
+        log_call(FD, UD, 0.0, 1.0, "paraxial");
         break; }
 
     case 5: {
@@ -336,8 +601,6 @@ UserDefinedSurface3(USER_DATA *UD, FIXED_DATA3 *FD)
            the phase no longer depends on how the LDE approximates the
            substrate material.                                        */
         RingTable *t = get_table((int)(FD->param[1] + 0.5));
-        double scale = FD->param[2];
-        double zsign = FD->param[3];
 
         if (!t) return -1;                       /* table missing      */
 
@@ -362,16 +625,10 @@ UserDefinedSurface3(USER_DATA *UD, FIXED_DATA3 *FD)
         UD->ln = 0.0; UD->mn = 0.0; UD->nn = -1.0;
 
         double rho = sqrt(UD->x * UD->x + UD->y * UD->y);
-        int i = (int)(rho / t->delta);
-        double h = (i >= 0 && i < t->n) ? t->h[i] : 0.0;   /* mm      */
-
-        double dz = 0.0;
-        if (FD->n2 != 0.0) {
-            double nl = n_resist(FD->wavelength);   /* lam in um      */
-            /* SIGN: OPD law is +n2*z (calibrated to 1.7e-11 um
-               against the canonical table, 2026-08-31)             */
-            dz = zsign * scale * (nl - 1.0) * h / FD->n2;
-        }
+        double tran = 1.0;
+        double dz = intercept_dz(t, FD, rho, &tran);
+        UD->rel_surf_tran = tran;
+        log_call(FD, UD, dz, tran, "trace");
         double tstep = (UD->n != 0.0) ? (dz - UD->z) / UD->n : 0.0;
         UD->x += tstep * UD->l;
         UD->y += tstep * UD->m;
@@ -400,6 +657,11 @@ UserDefinedSurface3(USER_DATA *UD, FIXED_DATA3 *FD)
         FD->param[2] = 1.0;   /* Height scale */
         FD->param[3] = 1.0;   /* Z sign       */
         FD->param[4] = 0.0;   /* Parax f      */
+        FD->param[5] = 0.0;   /* Sub ideal    */
+        FD->param[6] = 0.0;   /* Avg cell [mm]: 0 = point sample */
+        FD->param[7] = 0.0;   /* OPD law: 0 = +n2*z (batch trace), 1 = (n1-n2)*z physical (POP) */
+        FD->param[8] = 0.0;   /* Debug log: 1 = write us_mdl_rings_log.txt (first calls) */
+        FD->param[9] = 1.0;   /* dz gain (diagnostic multiplier on the displacement) */
         break; }
 
     case 8:
@@ -412,6 +674,7 @@ UserDefinedSurface3(USER_DATA *UD, FIXED_DATA3 *FD)
 
     default:
         /* unknown request type: NOT an error (us_stand.c returns 0) */
+        log_call(FD, UD, 0.0, 1.0, "unknown-type");
         break;
     }
     return 0;
