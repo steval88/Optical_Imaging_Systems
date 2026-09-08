@@ -140,11 +140,26 @@ h = m * prob.dh                      # ring heights h_i = m_i * dh   [um]
 rho = prob.rho                       # ring center radii              [um]
 drho = prob.delta                    # ring width DELTA               [um]
 R = prob.R                           # aperture radius                [um]
+# ring quadrature of the design field -- same rule and same config key
+# as run_verify.py (2026-09-08): "sinc" = analytic ring integral of the
+# kernel phase ramp (physical staircase, default), "midpoint" = one
+# kernel sample per ring (paper Eq. 4). The ideal-lens reference keeps
+# the midpoint sum, which is exact for a continuous phase.
+RS_QUAD = str(cfg.get("rs_ring_quadrature", "sinc")).lower()
+if RS_QUAD not in ("sinc", "midpoint"):
+    raise SystemExit("rs_ring_quadrature must be 'sinc' or 'midpoint'")
+
+
+def ring_factor(lam, rb):
+    if RS_QUAD == "midpoint":
+        return 1.0
+    return np.sinc(drho * rho / (lam * rb))
 
 out_rs = os.path.join(run_dir, "rs")
 os.makedirs(out_rs, exist_ok=True)
 
 log("run: %s" % run_dir)
+log("RS ring quadrature: %s" % RS_QUAD)
 log("design '%s': D=%.2f mm, F=%.2f mm, NA=%.4f | %d rings x %.2f um"
     % (cfg["name"], D / 1000, F / 1000, na, prob.N, prob.delta))
 
@@ -158,14 +173,15 @@ def exit_field(lam):
 
 
 def rs_psf(lam, z, r0grid):
-    """J0-reduced RS-I field U(r0, z) -- identical to run_verify.rs_psf."""
+    """J0-reduced RS-I field U(r0, z) -- identical to run_verify.rs_psf
+    (incl. the ring_factor of 2026-09-08)."""
     E0 = exit_field(lam)
     k = 2 * pi / lam
     out = np.empty(r0grid.size, dtype=complex)
     for ir, r0 in enumerate(r0grid):
         rb = np.sqrt(z * z + rho * rho + r0 * r0)
         integ = E0 * j0(k * rho * r0 / rb) * np.exp(1j * k * rb) / rb ** 2 \
-            * rho
+            * rho * ring_factor(lam, rb)
         out[ir] = (z / (1j * lam)) * 2 * pi * drho * np.sum(integ)
     return out
 

@@ -483,6 +483,17 @@ static double intercept_dz(const RingTable *t, const FIXED_DATA3 *FD,
        bookkeeping (n2) nor the physical path (n1-n2) -- a gain sweep
        identifies the factor empirically. Default 1 (no effect).      */
     if (FD->param[9] != 0.0) dz *= FD->param[9];
+    /* Par 10 (dz offset [mm], 2026-09-07): constant added to the
+       displacement so that EVERY intercept lies at z > 0. A constant
+       displacement is a constant phase (invisible), but the Huygens
+       gain sweep showed gain -1 != gain +1 (corr 0.886 vs 0.990) for
+       a rotationally symmetric residual -- impossible for a pure
+       phase at focus -- and a monotone energy loss with |gain|: the
+       hypothesis is that rays whose intercept falls BEHIND the
+       surface vertex (negative step) are not propagated correctly by
+       the wave engines. Offset >= lam/(2(n1-n2)) removes negative
+       steps for the wrapped cell-mean phase.                        */
+    dz += FD->param[10];
     return dz;
 }
 
@@ -533,6 +544,7 @@ UserDefinedSurface3(USER_DATA *UD, FIXED_DATA3 *FD)
         case 7: strcpy(UD->string, "OPD law");      break;
         case 8: strcpy(UD->string, "Debug log");    break;
         case 9: strcpy(UD->string, "dz gain");      break;
+        case 10: strcpy(UD->string, "dz offset");   break;
         default: UD->string[0] = '\0';              break;
         }
         break;
@@ -662,6 +674,7 @@ UserDefinedSurface3(USER_DATA *UD, FIXED_DATA3 *FD)
         FD->param[7] = 0.0;   /* OPD law: 0 = +n2*z (batch trace), 1 = (n1-n2)*z physical (POP) */
         FD->param[8] = 0.0;   /* Debug log: 1 = write us_mdl_rings_log.txt (first calls) */
         FD->param[9] = 1.0;   /* dz gain (diagnostic multiplier on the displacement) */
+        FD->param[10] = 0.0;  /* dz offset [mm]: constant displacement (constant phase) */
         break; }
 
     case 8:

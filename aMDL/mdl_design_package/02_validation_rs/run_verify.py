@@ -88,14 +88,56 @@ bounded by k*(rho*r0)^2 / (2*rbar^3). Worst case for the S3 geometry
 ~1.4e-3 rad -- negligible. ON AXIS (r0 = 0, used by rs_onaxis()) the
 reduction is EXACT: no cross term exists and J0(0) = 1.
 
-DISCRETIZATION. Midpoint-rule quadrature over the physical rings: one
-sample per ring at its center rho_i = (i+1/2)*DELTA, area weight
-2*pi*rho_i*DELTA. The field U0 is exactly piecewise-constant per ring
-(staircase), and this is the SAME discretization used by the design FOM
-in mdl_core.MDLProblem (tables G, L), so design and verification are
-mutually consistent by construction; it was additionally cross-checked
-against Zemax Huygens-PSF results (which agree with the RS metrics --
-see the project findings doc).
+DISCRETIZATION -- ring quadrature (revised 2026-09-08). The field U0
+is exactly piecewise-constant per ring (staircase), so the aperture
+integral is a sum of ring integrals
+
+    SUM_i U0_i INT_{rho_i - DELTA/2}^{rho_i + DELTA/2}
+               J0(k rho r0/rbar) e^{ik rbar(rho)} / rbar^2  rho d rho.
+
+The KERNEL is not constant across a ring: its phase k*rbar(rho) ramps
+by k*DELTA*rho/rbar, i.e. an optical path of DELTA*rho/rbar = 0.200 um
+at the rim of the S3 geometry (DELTA = 2 um, rho = R = 5.12 mm) -- half
+a wave at 400 nm. A flat ring cannot follow that ramp; the light it
+fails to blaze is the classic staircase quantization loss (Swanson [6]),
+locally sinc^2(DELTA rho/(lambda rbar)): 1.00 on axis, 0.81 at R/2, 0.41
+at the rim at 400 nm. The MIDPOINT rule (one kernel sample per ring at
+rho_i, the discretization of the paper's Eq. 4 and of the design FOM in
+mdl_core.MDLProblem) does not see the ramp and therefore OVERSTATES the
+focal field: measured on the s3 softmin design, the midpoint focal PSF
+is 1.5-3 % too narrow at 400-750 nm and its on-axis intensity too high
+by up to ~1.5x at 400 nm (synthetic harmonic lens: 1.50 / 1.39 / 1.23 /
+1.12 / 1.07 / 1.05 at 409 / 450 / 562 / 750 / 1000 / 1125 nm).
+
+The ring integral of a linear phase ramp is analytic: with the slowly
+varying amplitude and J0 held at the ring centre,
+
+    INT_ring (...) rho d rho  ~  [midpoint term] * sinc(DELTA rho_i /
+                                                 (lambda rbar_i)),
+    sinc(x) = sin(pi x)/(pi x)   (numpy convention),
+
+exact to first order in the ramp (the curvature of rbar across DELTA
+and the J0 variation, k DELTA r0/rbar <= 0.02 rad in the window, are
+negligible). Validated against a 0.125 um sub-ring quadrature on a
+synthetic s3-like lens: peak within 0.15 % (409 nm) .. 0.02 %
+(1125 nm), FWHM within 0.001 um, max profile deviation 1.4e-3 of the
+peak -- versus 50 % peak error for the midpoint rule at 409 nm. The
+factor is applied to the DESIGN field in rs_onaxis / rs_psf
+(config key rs_ring_quadrature: "sinc" [default] | "midpoint"; the
+latter reproduces pre-2026-09-08 numbers). It is NOT applied to the
+ideal-lens references (ideal_peak / ideal_profile): the ideal element
+carries the continuous hyperbolic phase, which cancels the kernel ramp
+at the focus, so the midpoint sum is already exact for it -- the
+strehl_like / strehl_shape ratios therefore now compare the physical
+staircase to the true ideal lens instead of relying on a bias
+cancellation. Independent check: OpticStudio's Huygens PSF on the
+hybrid system (one wavelet per 20 um pupil ray, residual phase
+cell-averaged from a 0.125 um grid) agrees with the sub-ring
+quadrature to corr 1.0000 and FWHM 0.6 % at 400-1100 nm, and sits
+1.5-3 % wide of the midpoint curves at the short lines (findings doc,
+2026-09-07/08). The design FOM (mdl_core tables G) still uses the
+midpoint rule -- it is an UPPER BOUND on efficiency at the short end
+until the same factor is folded into G[w, i].
 
 ===========================================================================
 METRICS reported per verification wavelength
@@ -112,8 +154,9 @@ METRICS reported per verification wavelength
                 the FWHM"; radius 1.5x FWHM below) -- see also
                 Engelberg & Levy [7] on why this convention matters.
 * strehl_like : on-axis peak intensity / peak of an IDEAL lens of the
-                same aperture and focal length, computed with the same
-                quadrature (discretization bias cancels in the ratio).
+                same aperture and focal length (design: sub-ring
+                quadrature via the sinc factor; ideal: midpoint, exact
+                for its continuous phase -- see DISCRETIZATION).
                 "Strehl-like" because the reference is the perfect
                 hyperbolic phase at that wavelength, not a best-fit
                 sphere. EFFICIENCY-INCLUSIVE: for a diffraction-
@@ -129,7 +172,7 @@ METRICS reported per verification wavelength
                 r <= verify_r_max_um):
                   S = [max I / P_win] / [max I_ideal / P_win,ideal],
                   P_win = INT_window I(r) 2 pi r dr,
-                ideal = the same-quadrature ideal-lens PSF. SHAPE-
+                ideal = the ideal-lens PSF (midpoint, exact). SHAPE-
                 ONLY: diffraction efficiency cancels; this answers
                 "is the focal spot diffraction-limited in form?".
                 Window-dependent (a wider window admits more halo and
@@ -274,6 +317,23 @@ h = m * prob.dh                      # ring heights h_i = m_i * dh   [um]
 rho = prob.rho                       # ring center radii (i+1/2)*DELTA [um]
 drho = prob.delta                    # ring width DELTA               [um]
 R = prob.R                           # aperture radius                [um]
+# ring quadrature for the DESIGN field (header STEP 3, DISCRETIZATION):
+# "sinc" = analytic ring integral of the kernel phase ramp (physical
+# staircase, default since 2026-09-08); "midpoint" = one kernel sample
+# per ring (paper Eq. 4 / design-FOM discretization, pre-2026-09-08).
+RS_QUAD = str(cfg.get("rs_ring_quadrature", "sinc")).lower()
+if RS_QUAD not in ("sinc", "midpoint"):
+    raise SystemExit("rs_ring_quadrature must be 'sinc' or 'midpoint', "
+                     "got %r" % RS_QUAD)
+
+
+def ring_factor(lam, rb):
+    """Analytic ring-integral factor sinc(DELTA rho_i / (lam rbar_i))
+    for the design field's piecewise-constant rings (1.0 in midpoint
+    mode). rb = rbar_i array on the same rings as rho."""
+    if RS_QUAD == "midpoint":
+        return 1.0
+    return np.sinc(drho * rho / (lam * rb))
 
 # snapshot this script into the run folder (traceability)
 os.makedirs(os.path.join(run_dir, "scripts"), exist_ok=True)
@@ -297,6 +357,14 @@ log("objective: %s, fom_mode=%s | band %.0f-%.0f nm | verifying at %d "
        lmin * 1000, lmax * 1000, lam_list.size))
 log("design vector: %s (levels 0..%d used, h_max=%.2f um)"
     % (m_file, int(m.max()), float(h.max())))
+log("RS ring quadrature: %s%s"
+    % (RS_QUAD, " (analytic ring integral of the kernel phase ramp; rim "
+                "ramp %.3f um = %.2f waves at %.0f nm)"
+       % (drho * R / np.sqrt(R * R + F * F),
+          drho * R / np.sqrt(R * R + F * F) / lam_list.min(),
+          1000 * lam_list.min()) if RS_QUAD == "sinc" else
+       " (one kernel sample per ring -- paper Eq. 4; overstates the "
+       "focal field at short wavelengths, see header)"))
 log("J_continuous(alias-safe, Nw=%d) = %.4f"
     % (cfg["n_wavelengths"], prob.fom(m)))
 
@@ -324,14 +392,16 @@ def rs_onaxis(lam, zgrid):
     quadrature:
 
         U(0,z) = (z/(i lam)) SUM_i U0_i e^{ik rbar_i}/rbar_i^2
-                 * 2 pi rho_i DELTA
+                 * 2 pi rho_i DELTA * ring_factor_i
+    with ring_factor_i = sinc(DELTA rho_i/(lam rbar_i)) (header
+    DISCRETIZATION; 1 in midpoint mode).
     """
     E0 = exit_field(lam)
     k = 2 * pi / lam
     out = np.empty(zgrid.size, dtype=complex)
     for iz, z in enumerate(zgrid):
         rb = np.sqrt(z * z + rho * rho)          # exact r01 at r0 = 0
-        integ = E0 * np.exp(1j * k * rb) / rb ** 2 * rho
+        integ = E0 * np.exp(1j * k * rb) / rb ** 2 * rho * ring_factor(lam, rb)
         out[iz] = (z / (1j * lam)) * 2 * pi * drho * np.sum(integ)
     return out
 
@@ -342,8 +412,11 @@ def rs_psf(lam, z, r0grid):
     Axisymmetric Bessel reduction of RS-I (header STEP 3):
 
         U(r0,z) = (z/(i lam)) SUM_i U0_i J0(k rho_i r0 / rbar_i)
-                  * e^{ik rbar_i}/rbar_i^2 * 2 pi rho_i DELTA,
-        rbar_i  = sqrt(z^2 + rho_i^2 + r0^2).
+                  * e^{ik rbar_i}/rbar_i^2 * 2 pi rho_i DELTA
+                  * ring_factor_i,
+        rbar_i  = sqrt(z^2 + rho_i^2 + r0^2),
+        ring_factor_i = sinc(DELTA rho_i/(lam rbar_i))  (header
+        DISCRETIZATION; 1 in midpoint mode).
 
     Neglected phase term <= k (rho r0)^2/(2 rbar^3): ~1.4e-3 rad worst
     case at the S3 geometry for r0 <= 30 um (see header). J0 identity:
@@ -355,7 +428,7 @@ def rs_psf(lam, z, r0grid):
     for ir, r0 in enumerate(r0grid):
         rb = np.sqrt(z * z + rho * rho + r0 * r0)
         integ = E0 * j0(k * rho * r0 / rb) * np.exp(1j * k * rb) / rb ** 2 \
-            * rho
+            * rho * ring_factor(lam, rb)
         out[ir] = (z / (1j * lam)) * 2 * pi * drho * np.sum(integ)
     return out
 
@@ -365,9 +438,10 @@ def ideal_peak(lam):
 
     The ideal element carries the exact hyperbolic phase
     exp[-ik(sqrt(rho^2+F^2)-F)] which makes the RS-I integrand phase
-    stationary at the focus; its on-axis focal amplitude, computed with
-    the SAME quadrature as rs_onaxis, normalizes the strehl_like
-    metric (discretization bias cancels in the ratio).
+    stationary at the focus; its on-axis focal amplitude normalizes
+    the strehl_like metric. NO ring factor here: the continuous ideal
+    phase cancels the kernel ramp, so the midpoint sum is already the
+    exact integral for the ideal lens (header DISCRETIZATION).
     """
     k = 2 * pi / lam
     rb = np.sqrt(F * F + rho * rho)
@@ -379,10 +453,9 @@ def ideal_profile(lam, r0grid):
     """Focal-plane PSF |U_ideal(r0, F)|^2 of the IDEAL lens (same R,
     F, quadrature): the exact hyperbolic phase propagated by the same
     J0-reduced RS-I as rs_psf. Reference for the strehl_shape metric
-    (paper Fig. 4f convention -- see header METRICS): computing the
-    ideal PSF with the identical quadrature makes discretization bias
-    cancel in the shape-Strehl ratio, exactly as ideal_peak does for
-    strehl_like."""
+    (paper Fig. 4f convention -- see header METRICS). No ring factor:
+    the ideal element is a continuous phase, exact under the midpoint
+    sum (see ideal_peak)."""
     k = 2 * pi / lam
     rb0 = np.sqrt(rho * rho + F * F)
     E0 = np.exp(-1j * k * (rb0 - F))
@@ -397,7 +470,8 @@ def ideal_profile(lam, r0grid):
 
 # ---- on-axis scans (focal shift / achromaticity, paper Fig. 2e) ----------
 results = {"run_dir": run_dir, "m_file": m_file,
-           "lam_um": lam_list.tolist(), "F_um": F}
+           "lam_um": lam_list.tolist(), "F_um": F,
+           "rs_ring_quadrature": RS_QUAD}
 zgrid = np.linspace(F - cfg["verify_z_span_um"],
                     F + cfg["verify_z_span_um"], cfg["verify_z_points"])
 onax = {}
@@ -465,8 +539,8 @@ for lam in lam_list:
     # shape Strehl (header METRICS, paper Fig. 4f convention): both
     # PSFs normalized to the power captured in the r0grid window (the
     # CCD analogue), so diffraction efficiency cancels and only core
-    # fidelity remains. Ideal reference: same-quadrature ideal-lens
-    # PSF on the same window.
+    # fidelity remains. Ideal reference: ideal-lens PSF (midpoint rule,
+    # exact for its continuous phase) on the same window.
     I_id = ideal_profile(lam, r0grid)
     p_win = np.trapezoid(I * 2 * pi * r0grid, r0grid)
     p_win_id = np.trapezoid(I_id * 2 * pi * r0grid, r0grid)

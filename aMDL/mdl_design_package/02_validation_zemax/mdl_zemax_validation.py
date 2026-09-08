@@ -199,6 +199,12 @@ POP_SETTINGS = {
     # works (n1 is read from OpticStudio); the model-glass solve is
     # NOT evaluated by POP (NaN pilot, 2026-09-04), hence a catalog.
     "phase_glass": "N-BK7",
+    # Constant added to the residual displacement (DLL Par 10) so no
+    # intercept lies behind the surface vertex: the Huygens gain sweep
+    # of 2026-09-07 showed sign asymmetry and monotone energy loss,
+    # i.e. negative steps are mishandled. 1.5 um exceeds
+    # lam/(2(n1-n2)) = 1.08 um at 1.1 um for N-BK7. Constant phase only.
+    "dz_offset_mm": 0.0015,
     # True: list the ZOS-API member names of the surface Physical Optics
     # data and of the typed POP settings (how the real property names
     # were learned on 2026-09-07); off by default -- noise once known
@@ -344,7 +350,7 @@ def rs_tiles(U, rho, delta, lam, zgrid, r0grid):
     return out
 
 
-SCRIPT_VERSION = "2026-09-07.15"     # bumped at every delivery; echoed
+SCRIPT_VERSION = "2026-09-08.04"     # bumped at every delivery; echoed
                                      # in the configuration section so a
                                      # stale copy is visible at a glance
 _SECTION = [0]
@@ -735,18 +741,38 @@ def main():
         # the +n2*z bookkeeping only exists in the batch-trace OPD
         # output (rz). Both wave engines therefore get the index step
         # and the physical law.
-        if mode in ("pop", "huy"):
-            try:
-                surf_par.Material = str(POP_SETTINGS["phase_glass"])
-                surf_par.Comment += " | %s behind it: index step for the " \
-                                    "residual UDS phase" % POP_SETTINGS["phase_glass"]
-            except Exception as exc:
-                print("  (could not set %s behind the Paraxial surface: %s -- "
-                      "POP will see NO residual phase)"
-                      % (POP_SETTINGS["phase_glass"], exc))
         surf_par.GetSurfaceCell(ZOSAPI.Editors.LDE.SurfaceColumn.Par1)\
             .DoubleValue = float(bfd_mm)
-        surf2 = TheLDE.InsertNewSurfaceAt(3)
+        surf_plate = None
+        next_idx = 3
+        if mode in ("pop", "huy"):
+            # ZERO-THICKNESS GLASS PLATE between the Paraxial lens (kept
+            # in AIR) and the residual UDS. 2026-09-08: putting the glass
+            # directly behind the Paraxial surface made the lens focus
+            # inside glass at n'F = 77.98 mm and the flat interface
+            # refract the rays back to F -- geometrically exact (marginal
+            # ray y = 0.0000) but the WAVEFRONT the engines assign to a
+            # paraxial lens focusing at L = n'F, -n'(sqrt(rho^2+L^2)-L),
+            # differs from the air sphere by rho^4/(8F^3)(1-1/n'^2) =
+            # 0.37 um at the rim = 0.5 wave at 750 nm of spherical
+            # aberration: the Huygens gain sweep saw a symmetric extra
+            # phase (gain -1 != gain +1, energy leaving the core at any
+            # gain, no gain matching). A zero-thickness plate has no
+            # such term (its two interfaces cancel exactly) and still
+            # gives the UDS its glass->air index step.
+            surf_plate = TheLDE.InsertNewSurfaceAt(3)
+            surf_plate.Thickness = 0.0
+            try:
+                surf_plate.Material = str(POP_SETTINGS["phase_glass"])
+            except Exception as exc:
+                print("  (could not set %s on the plate surface: %s -- "
+                      "the wave engines will see NO residual phase)"
+                      % (POP_SETTINGS["phase_glass"], exc))
+            surf_plate.Comment = "%s plate, zero thickness: index step " \
+                "for the residual UDS (lens stays in air)" \
+                % POP_SETTINGS["phase_glass"]
+            next_idx = 4
+        surf2 = TheLDE.InsertNewSurfaceAt(next_idx)
         uds_type = surf2.GetSurfaceTypeSettings(
             ZOSAPI.Editors.LDE.SurfaceType.UserDefined)
         uds_type.Filename = "us_mdl_rings.dll"
@@ -770,6 +796,26 @@ def main():
         # OPD law: POP needs the physical path (index step); the ray
         # engines (Huygens, batch trace) use the calibrated +n2*z law
         set_par(7, 1.0 if mode in ("pop", "huy") else 0.0)
+        set_par(9, 1.0)                  # dz gain (diagnostic) = 1
+        set_par(10, float(POP_SETTINGS["dz_offset_mm"])
+                if mode in ("pop", "huy") else 0.0)
+        try:
+            hdrs = []
+            for k_ in range(1, 11):
+                col_ = getattr(ZOSAPI.Editors.LDE.SurfaceColumn, "Par%d" % k_)
+                hdrs.append(str(surf2.GetSurfaceCell(col_).Header))
+            print("  DLL parameter headers (from the loaded DLL): %s"
+                  % ", ".join(hdrs))
+            if "dz offset" not in hdrs:
+                print("  WARNING: the installed us_mdl_rings.dll predates "
+                      "Par 10 'dz offset' -- rebuild and copy it")
+        except Exception as exc:
+            print("  (DLL parameter headers not readable: %s)" % exc)
+        print("  residual UDS: OPD law %d, dz gain 1, dz offset %.4f mm "
+              "(all intercepts at z > 0)"
+              % (1 if mode in ("pop", "huy") else 0,
+                 float(POP_SETTINGS["dz_offset_mm"])
+                 if mode in ("pop", "huy") else 0.0))
     elif variant == "uds_stand":
         # OpticStudio's own standard-surface UDS (UserDefinedSurface3
         # entry point), left FLAT: does POP propagate through ANY User
@@ -1283,7 +1329,10 @@ def main():
                     # inherits the fine grid
                     pop_flags(surf_par, "surface 2 (Paraxial lens)",
                               resample=bool(POP_SETTINGS["resample_lens_plane"]))
-                    pop_flags(surf2, "surface 3 (residual UDS)")
+                    if surf_plate is not None:
+                        pop_flags(surf_plate, "surface 3 (glass plate)")
+                    pop_flags(surf2, "surface %d (residual UDS)"
+                              % int(surf2.SurfaceNumber))
                 else:
                     pop_flags(surf2, "surface 2 (%s)" % variant,
                               resample=bool(POP_SETTINGS["resample_lens_plane"]))
@@ -1398,7 +1447,8 @@ def main():
                     print("  (typed POP settings not applied: %s)" % exc)
             return failed
 
-        def radial_profile(arr, dx_um, r_max_um, fine_um=0.05):
+        def radial_profile(arr, dx_um, r_max_um, fine_um=0.05,
+                           about_axis=False):
             """Azimuthal average around the TRUE peak: (r_um, prof,
             peak_xy_um relative to grid center).
 
@@ -1416,6 +1466,10 @@ def main():
             from scipy.ndimage import zoom as _zoom
             ny, nx = arr.shape
             iy, ix = np.unravel_index(int(np.argmax(arr)), arr.shape)
+            if about_axis:
+                # annular / defocused patterns: profile about the optical
+                # axis (grid centre), not about the off-axis maximum
+                iy, ix = ny // 2, nx // 2
             half = int(np.ceil(r_max_um / dx_um)) + 4
             y0, y1 = max(iy - half, 0), min(iy + half + 1, ny)
             x0, x1 = max(ix - half, 0), min(ix + half + 1, nx)
@@ -1428,6 +1482,11 @@ def main():
             else:
                 subf, dxf = sub, dx_um
             jy, jx = np.unravel_index(int(np.argmax(subf)), subf.shape)
+            if about_axis:
+                jy = int(round((ny / 2.0 - y0) * up - 0.5 * (up - 1)))
+                jx = int(round((nx / 2.0 - x0) * up - 0.5 * (up - 1)))
+                jy = min(max(jy, 0), subf.shape[0] - 1)
+                jx = min(max(jx, 0), subf.shape[1] - 1)
             yy, xx = np.mgrid[0:subf.shape[0], 0:subf.shape[1]]
             rr = np.hypot((xx - jx) * dxf, (yy - jy) * dxf)
             k = np.floor(rr / dxf).astype(int)
@@ -1565,8 +1624,8 @@ def main():
 
         if surf_par is not None:
             section("POP hybrid: focus check of the Paraxial lens",
-                    "one marginal real ray through glass + flat interface "
-                    "must reach the axis at the image")
+                    "one marginal real ray through the lens, the plate and "
+                    "the flat UDS must reach the axis at the image")
         # --- hybrid: does the Paraxial lens focus at F THROUGH the glass
         # and the flat interface? Trace one marginal real ray (Height
         # scale 0 = flat residual surface) to the image; if it misses
@@ -1948,11 +2007,32 @@ def main():
                 return x, T, S
 
         section("reference profiles",
-                "RS focal slice from rs/verify_rzmap.npz (ring-midpoint "
-                "quadrature) and the in-script sub-ring quadrature")
+                "RS focal slice from rs/verify_rzmap.npz (ring quadrature "
+                "as tagged in rs/verify_metrics.json) and the in-script "
+                "sub-ring quadrature")
         # --- RS references (rungs 3 and 4) ------------------------------
+        # run_verify.py writes rs_ring_quadrature ("sinc" since
+        # 2026-09-08: analytic ring integral of the kernel phase ramp;
+        # "midpoint": one kernel sample per ring, all earlier files) into
+        # rs/verify_metrics.json. Read back, never assumed: the label of
+        # the RS column below follows the file.
         rs_rz = rs_mtf = None
+        rs_quad = "midpoint"          # pre-09-08 files carry no tag
+        rs_quad_src = "no rs/verify_metrics.json"
         if "run_dir" in design:
+            cand = os.path.join(design["run_dir"], "rs",
+                                "verify_metrics.json")
+            if os.path.exists(cand):
+                try:
+                    with open(cand) as fh:
+                        _vm = json.load(fh)
+                    rs_quad = str(_vm.get("rs_ring_quadrature",
+                                          "midpoint"))
+                    rs_quad_src = ("rs_ring_quadrature key" if
+                                   "rs_ring_quadrature" in _vm else
+                                   "no key -> pre-2026-09-08 file")
+                except Exception as e:
+                    rs_quad_src = "unreadable (%s)" % e
             for cand in (os.path.join(design["run_dir"], "rs",
                                       "verify_rzmap.npz"),
                          os.path.join(design["run_dir"],
@@ -1963,6 +2043,9 @@ def main():
             cand = os.path.join(design["run_dir"], "rs", "verify_mtf.npz")
             if os.path.exists(cand):
                 rs_mtf = np.load(cand)
+        print("  RS reference quadrature (rs/verify_rzmap.npz, "
+              "verify_mtf.npz): %s  [%s]" % (rs_quad, rs_quad_src))
+        rs_tag = "mid" if rs_quad == "midpoint" else rs_quad
 
         # --- fine-quadrature RS focal profile (rungs 3/4) ---------------
         # run_verify / rs_tiles integrate the RS-I kernel with ONE sample
@@ -2123,8 +2206,9 @@ def main():
                 "one %s run per line to the image plane; radial PSF, "
                 "FWHM and correlation against the references"
                 % ("POP" if mode == "pop" else "Huygens PSF (+ Huygens MTF)"))
-        print("  lam(um)  peak(x,y)um   FWHM_pop  FWHM_rs(mid)  ratio   "
-              "FWHM_rs(fine)  ratio   corr_mid  corr_fine  P(3FWHM)/P   "
+        print("  lam(um)  peak(x,y)um   FWHM_%s  FWHM_rs(%s)  ratio   "
+              "FWHM_rs(fine)  ratio   corr_%s  corr_fine  P(3FWHM)/P   "
+              % ("pop" if mode == "pop" else "huy", rs_tag, rs_tag) +
               "| H2: FWHM  ratio  corr | H3 no-phase |m|: FWHM ratio corr "
               "| |m|^2: FWHM ratio corr | H4 phase-only: FWHM ratio corr")
         results = []
@@ -2190,9 +2274,17 @@ def main():
                     print("  (RS focal slice at %.2f um has no on-axis "
                           "half crossing: I(0)/Imax = %.3f, peak at "
                           "r = %.2f um -- annular/defocused at z = F; "
-                          "rz peak plane differs)"
+                          "rz peak plane differs). %s profile re-taken "
+                          "ABOUT THE AXIS for the comparison."
                           % (lam, ref_I[0] / max(ref_I.max(), 1e-30),
-                             ref_r[jr]))
+                             ref_r[jr], ENGINE))
+                    r_um, prof, _pk = radial_profile(
+                        arr, dx_um, max(r_cmp, 30.0) + 5.0, about_axis=True)
+                    jp = int(np.argmax(prof))
+                    print("  %s about the axis: I(0)/Imax = %.3f, peak at "
+                          "r = %.2f um" % (ENGINE, prof[0] / max(prof.max(),
+                                                                 1e-30),
+                                           r_um[jp]))
                 pi_ = np.interp(ref_r, r_um, prof)
                 if pi_.max() > 0 and ref_I.max() > 0:
                     corr = float(np.corrcoef(pi_ / pi_.max(),
@@ -2265,6 +2357,48 @@ def main():
                 selm = r_um <= r_w
                 mtf_pop = hankel_mtf(prof[selm], r_um[selm], f_um)
                 store["MTF_%d" % key] = mtf_pop
+                # --- MTF numbers: quality = area to the OWN diffraction
+                # limit's cutoff, MTF50, and the largest deviation between
+                # the three curves on the RS frequency grid ----------------
+                try:
+                    fl_ = rs_mtf["f_lppmm"]
+                    fc_ = 2.0 * na_par / (lam * 1e-3)          # lp/mm
+                    dl_ = rs_mtf["MTFdl_%d" % key] \
+                        if "MTFdl_%d" % key in rs_mtf.files else None
+                    rs_ = rs_mtf["MTF_%d" % key] \
+                        if "MTF_%d" % key in rs_mtf.files else None
+                    selc = fl_ <= fc_
+
+                    def q_(m_):
+                        if m_ is None or dl_ is None:
+                            return float("nan")
+                        return float(np.trapezoid(m_[selc], fl_[selc])
+                                     / max(np.trapezoid(dl_[selc], fl_[selc]),
+                                           1e-30))
+
+                    def f50_(m_):
+                        if m_ is None:
+                            return float("nan")
+                        j_ = np.where(m_ < 0.5)[0]
+                        return float(fl_[j_[0]]) if j_.size else float("nan")
+                    zm_ = None
+                    if hmtf is not None:
+                        zm_ = np.interp(fl_, hmtf[0], hmtf[1])
+                    dev_z = float(np.nanmax(np.abs(zm_ - mtf_pop)[selc])) \
+                        if zm_ is not None else float("nan")
+                    dev_rs = float(np.nanmax(np.abs(rs_ - mtf_pop)[selc])) \
+                        if rs_ is not None else float("nan")
+                    print("  MTF %d nm: quality (area/limit to %.0f lp/mm) "
+                          "Hankel(%s PSF) %.3f | Zemax Huygens MTF %.3f | "
+                          "RS %.3f ; MTF50 %.0f / %.0f / %.0f lp/mm ; "
+                          "max|Zemax-Hankel| %.3f, max|RS-Hankel| %.3f"
+                          % (key, fc_, ENGINE, q_(mtf_pop), q_(zm_), q_(rs_),
+                             f50_(mtf_pop), f50_(zm_), f50_(rs_), dev_z,
+                             dev_rs))
+                    store["mtf_quality_%d" % key] = np.array(
+                        [q_(mtf_pop), q_(zm_), q_(rs_)])
+                except Exception as exc:
+                    print("  (MTF numbers not computed: %s)" % exc)
             # store
             ny, nx = arr.shape
             iy, ix = np.unravel_index(int(np.argmax(arr)), arr.shape)
@@ -2292,7 +2426,8 @@ def main():
                 if ref_r is not None:
                     a1.plot(ref_r, ref_I / max(ref_I.max(), 1e-30),
                             color="#e6550d", lw=1.6, ls="--",
-                            label=("RS focal slice (ring midpoint)"
+                            label=("RS focal slice (run_verify, %s)"
+                                   % rs_quad
                                    if pop_rung in (3, 4)
                                    and rs_rz is not None else
                                    "Airy (analytic)"))
@@ -2328,8 +2463,9 @@ def main():
                     a2.set_ylim(0, 1)
                     a2.set_xlabel("spatial frequency (lp/mm)")
                     a2.set_ylabel("MTF")
-                    a2.set_title("MTF from the POP focal irradiance "
-                                 "(same Hankel/window as rs)", fontsize=9)
+                    a2.set_title("MTF: Hankel of the %s PSF (same window "
+                                 "as rs) vs Zemax Huygens MTF vs RS"
+                                 % ENGINE, fontsize=9)
                     a2.legend(fontsize=8)
                     a2.grid(alpha=0.25)
                 else:
@@ -2452,11 +2588,14 @@ def main():
                          "-- run 'pop 4' (Paraxial + cell-averaged "
                          "residual)"))
             elif mode == "huy":
-                # without polarization Zemax ignores rel_surf_tran: judge
-                # against the phase-only reference (H4); with it, against
-                # the full fine reference
+                # MEASURED 2026-09-08: the Huygens PSF applies the DLL's
+                # rel_surf_tran even with UsePolarization off (the
+                # gain-0.25 PSF matched the |m|-apodized no-phase model
+                # at corr 1.0000), so the reference is the FULL fine one
+                # (phase + transmission). Annular lines (no on-axis half
+                # crossing in the reference) are judged by corr only.
                 pol = bool(HUY_SETTINGS["use_polarization"])
-                i_f, i_c = (5, 6) if pol else (7, 8)
+                i_f, i_c = 5, 6
                 ratios_f = [r[1] / r[i_f] for r in results
                             if np.isfinite(r[1]) and np.isfinite(r[i_f])
                             and r[i_f] > 0]
@@ -2468,9 +2607,8 @@ def main():
                       "%s RS reference: FWHM Huygens/RS %s, "
                       "corr %s -> %s"
                       % (store.get("avg_cell_mm", 0.0),
-                         "FINE-quadrature (phase + transmission)" if pol
-                         else "PHASE-ONLY cell-mean (polarization off: "
-                              "rel_surf_tran ignored)",
+                         "FINE-quadrature (phase + transmission; "
+                         "polarization %s)" % ("on" if pol else "off"),
                          ", ".join("%.3f" % x for x in ratios_f),
                          ", ".join("%.4f" % x for x in corrs_f),
                          "the Huygens PSF reproduces the RS focal PSF: "
@@ -2494,7 +2632,7 @@ def main():
                       "reference: FWHM POP/RS %s, corr %s -> %s"
                       % (store.get("avg_cell_mm", 0.0),
                          "FINE-quadrature (staircase-integrated)"
-                         if ratios_f else "ring-midpoint",
+                         if ratios_f else "run_verify (%s)" % rs_quad,
                          ", ".join("%.3f" % x for x in ratios),
                          ", ".join("%.4f" % x for x in corrs),
                          "POP reproduces the RS focal PSF: the MDL is "
@@ -2511,8 +2649,8 @@ def main():
         print("re-saved system -> %s%s" % (
             zos_name, "  (POP window left open in the GUI and saved with "
                       "the file)" if GUI else
-            "  (run with 'gui' to keep the POP window open for "
-            "colleagues)"))
+            "  (run with 'gui' to keep the %s window open for "
+            "colleagues)" % ("POP" if mode == "pop" else "Huygens")))
         del zos
         return
 
