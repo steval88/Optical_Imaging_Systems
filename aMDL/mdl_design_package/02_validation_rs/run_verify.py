@@ -307,9 +307,16 @@ m = np.load(m_file)
 # that vary between calls (wavelength, plane z, observation grid) are
 # function parameters. (A reusable library would wrap this state in a
 # class; this is a run-once pipeline stage.)
+# ring quadrature of the DESIGN FOM tables (mdl_core header "Ring
+# quadrature"): the run's own setting, "midpoint" for run folders that
+# predate the key (2026-09-15), so every J number of an old run stays
+# what design_metrics.json says. Independent of rs_ring_quadrature below
+# (the RS propagation used for the verification metrics).
+FOM_QUAD = str(cfg.get("ring_quadrature", "midpoint"))
 prob = MDLProblem(D, na, lmin, lmax, cfg["ring_width_um"],
                   cfg["h_max_um"], cfg["dh_um"],
-                  n_wavelengths=cfg["n_wavelengths"])
+                  n_wavelengths=cfg["n_wavelengths"],
+                  ring_quadrature=FOM_QUAD)
 if m.size != prob.N:
     raise SystemExit("%s has %d rings; config expects %d"
                      % (m_file, m.size, prob.N))
@@ -365,6 +372,9 @@ log("RS ring quadrature: %s%s"
           1000 * lam_list.min()) if RS_QUAD == "sinc" else
        " (one kernel sample per ring -- paper Eq. 4; overstates the "
        "focal field at short wavelengths, see header)"))
+log("design-FOM ring quadrature (J metrics): %s%s"
+    % (FOM_QUAD, "" if "ring_quadrature" in cfg else
+       "  [config has no ring_quadrature key -> pre-2026-09-15 run]"))
 log("J_continuous(alias-safe, Nw=%d) = %.4f"
     % (cfg["n_wavelengths"], prob.fom(m)))
 
@@ -471,7 +481,7 @@ def ideal_profile(lam, r0grid):
 # ---- on-axis scans (focal shift / achromaticity, paper Fig. 2e) ----------
 results = {"run_dir": run_dir, "m_file": m_file,
            "lam_um": lam_list.tolist(), "F_um": F,
-           "rs_ring_quadrature": RS_QUAD}
+           "rs_ring_quadrature": RS_QUAD, "fom_ring_quadrature": FOM_QUAD}
 zgrid = np.linspace(F - cfg["verify_z_span_um"],
                     F + cfg["verify_z_span_um"], cfg["verify_z_points"])
 onax = {}
@@ -600,13 +610,14 @@ log("[3/4] r-z maps done -> verify_rzmap.npz (arrays: r0grid, zgrid, "
 log("[4/4] J metrics (all arithmetic-mean, comparable across runs)...")
 results["J_continuous"] = prob.fom(m)
 comb = MDLProblem(D, na, lmin, lmax, cfg["ring_width_um"], cfg["h_max_um"],
-                  cfg["dh_um"],
-                  n_wavelengths=lam_list.size).set_wavelengths(lam_list)
+                  cfg["dh_um"], n_wavelengths=lam_list.size,
+                  ring_quadrature=FOM_QUAD).set_wavelengths(lam_list)
 results["J_verify_comb"] = comb.fom(m)
 if lams_obj is not None:
     obj = MDLProblem(D, na, lmin, lmax, cfg["ring_width_um"],
                      cfg["h_max_um"], cfg["dh_um"],
-                     n_wavelengths=len(lams_obj)).set_wavelengths(
+                     n_wavelengths=len(lams_obj),
+                     ring_quadrature=FOM_QUAD).set_wavelengths(
                          np.asarray(lams_obj, dtype=float))
     results["J_objective"] = obj.fom(m)
 else:

@@ -39,10 +39,43 @@ Everything is vectorized on a per-gray-level phasor lookup table:
 
     L[w, m] = exp(i k(w) (n(w)-1) m dh)
     G[w, i] = (2F/R^2) * rho_i * DELTA / r_i * exp(i k(w) (sqrt(rho_i^2+F^2)-F))
+              * S[w, i]
     U(w)    = SUM_i G[w, i] * L[w, m_i]
 
 so one FOM evaluation is O(Nw * N) and a *single-ring* update is O(Nw)
 (delta evaluation), which makes Hooke-Jeeves cheap.
+
+Ring quadrature (S[w, i]; MDLProblem(ring_quadrature=...), 2026-09-15)
+----------------------------------------------------------------------
+Eq. 4 of the paper samples the diffraction kernel ONCE per ring, at
+the ring centre ("midpoint" rule, S = 1). Across a flat ring of width
+DELTA the kernel phase k (sqrt(rho^2+F^2) - F) ramps by
+k DELTA rho_i / r_i -- 0.200 um of path at the rim of the S3 geometry
+(DELTA = 2 um, R = 5.12 mm, F = 50.94 mm), half a wave at 400 nm. A
+flat ring cannot follow that ramp: the light it fails to blaze is the
+staircase quantization loss, and the midpoint rule does not see it.
+The ring integral of the ramp is analytic (amplitude and the ideal
+phase held at the ring centre):
+
+    S[w, i] = sinc(DELTA rho_i / (lam_w r_i)),   sinc(x) = sin(pi x)/(pi x)
+
+("sinc" rule). Measured on the s3 softmin design (run_verify.py,
+2026-09-08): the midpoint focal field is 1.5-3 % too narrow and up to
+~1.5x too bright on axis at 400-450 nm; with the sinc rule the RS
+propagation coincides with OpticStudio's Huygens PSF/MTF on the same
+design (corr 1.0000, FWHM within 0.6 %, MTF within 0.006). The design
+FOM therefore has the same switch: "sinc" makes the optimizer see the
+physical focal field (it stops chasing light the rings cannot blaze
+at the short lines); "midpoint" (the default, for backward
+compatibility of every run folder without the key) reproduces the
+paper's Eq. 4 and all pre-2026-09-15 J values. S is a real amplitude
+factor, so every gradient and delta update stays exact; it is NOT
+applied to the ideal-lens denominator of the overlap objective (the
+continuous ideal phase cancels the ramp). The RCWA correction path
+(apply_efficiency) expects corr = eta_rigorous / eta_scalar with the
+scalar table on the SAME rule: tea_zone_efficiency samples each ring
+at its centre (midpoint), so with "sinc" a sub-ring-sampled TEA table
+must be used or the ramp loss is counted twice.
 """
 
 from __future__ import annotations
@@ -84,7 +117,12 @@ class MDLProblem:
                  h_max_um: float,
                  dh_um: float,
                  n_wavelengths: int = 25,
-                 n_func=n_az4562):
+                 n_func=n_az4562,
+                 ring_quadrature: str = "midpoint"):
+        if ring_quadrature not in ("midpoint", "sinc"):
+            raise ValueError("ring_quadrature must be 'midpoint' or 'sinc', "
+                             "got %r" % (ring_quadrature,))
+        self.ring_quadrature = ring_quadrature
         self.R = 0.5 * diameter_um
         self.na = na
         # focal length from NA (in air): NA = R / sqrt(R^2 + F^2)
@@ -108,20 +146,28 @@ class MDLProblem:
 
         # ring center radii
         self.rho = (np.arange(self.N) + 0.5) * self.delta
-        r = np.sqrt(self.rho ** 2 + self.F ** 2)
+        self._build_tables()
+        # per-w normalization sanity: sum_i |G| = (2F/R^2) sum rho d / r ~ <1
+        self.Nw = n_wavelengths
 
-        # geometric phasor table G[w, i]  (includes ideal-lens defocus term)
+    def _build_tables(self):
+        """G[w, i] (geometry x ring-quadrature factor S) and L[w, m] for
+        the current self.lam. Also keeps the ideal-lens amplitude
+        self._amp_ideal[i] (no S: continuous phase) for the overlap
+        objective's denominator, and the factor itself as self.S."""
+        r = np.sqrt(self.rho ** 2 + self.F ** 2)
         geo_phase = self.k[:, None] * (r[None, :] - self.F)
         amp = (2.0 * self.F / self.R ** 2) * self.rho * self.delta / r
-        self.G = amp[None, :] * np.exp(1j * geo_phase)
-
-        # gray-level phasor table L[w, m], m = 0..M
+        if self.ring_quadrature == "sinc":
+            self.S = np.sinc(self.delta * self.rho[None, :]
+                             / (self.lam[:, None] * r[None, :]))
+        else:
+            self.S = np.ones((self.lam.size, self.rho.size))
+        self._amp_ideal = amp
+        self.G = amp[None, :] * self.S * np.exp(1j * geo_phase)
         kn = self.k * (self.n - 1.0)                          # [1/um]
         m = np.arange(self.M + 1)
         self.L = np.exp(1j * kn[:, None] * self.dh * m[None, :])
-
-        # per-w normalization sanity: sum_i |G| = (2F/R^2) sum rho d / r ~ <1
-        self.Nw = n_wavelengths
 
     def set_wavelengths(self, lams_um):
         """Rebuild the phasor tables on an EXPLICIT wavelength list [um].
@@ -134,13 +180,7 @@ class MDLProblem:
         self.omega = 2.0 * np.pi * C_UM_PER_S / self.lam
         self.k = 2.0 * np.pi / self.lam
         self.n = self.n_func(self.lam)
-        r = np.sqrt(self.rho ** 2 + self.F ** 2)
-        geo_phase = self.k[:, None] * (r[None, :] - self.F)
-        amp = (2.0 * self.F / self.R ** 2) * self.rho * self.delta / r
-        self.G = amp[None, :] * np.exp(1j * geo_phase)
-        kn = self.k * (self.n - 1.0)
-        m = np.arange(self.M + 1)
-        self.L = np.exp(1j * kn[:, None] * self.dh * m[None, :])
+        self._build_tables()
         self.Nw = self.lam.size
         # keep any efficiency correction / overlap tables consistent
         # with the new wavelength grid
@@ -355,8 +395,18 @@ class MDLProblem:
                * r0[:, :, None] / r[None, None, :])      # (Nw, nq, N)
         B = j0(arg)
         self.K = (self.G[:, None, :] * B).astype(self.G.dtype)
-        # ideal-lens denominator: all phase errors zero -> |G| in kernel
-        Uid = np.einsum("wqi->wq", np.abs(self.G)[:, None, :] * B)
+        # ideal-lens denominator: the CONTINUOUS ideal phase, all phase
+        # errors zero -> pure geometric amplitude in the kernel (no ring
+        # factor S -- the ideal phase cancels the ramp -- and no
+        # efficiency weight). Identical to |G| whenever S = 1 and no
+        # apply_efficiency() table is active (every run before
+        # 2026-09-15).
+        if self.ring_quadrature == "midpoint" and not hasattr(self, "_eta_table"):
+            ideal_amp = np.abs(self.G)               # bit-identical to old runs
+        else:
+            ideal_amp = np.broadcast_to(
+                self._amp_ideal.astype(self.G.real.dtype)[None, :], self.G.shape)
+        Uid = np.einsum("wqi->wq", ideal_amp[:, None, :] * B)
         self._enc_D = np.einsum("wq,wq->w", self._enc_w, Uid ** 2)
         self.objective = "overlap"
         return self

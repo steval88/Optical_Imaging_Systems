@@ -102,6 +102,17 @@ S3_CONTINUOUS = {
     "overlap_airy_factor": 2.0,      # disc radius in Airy radii
                                      #   (chromatic mode only)
     "overlap_n_r0": 24,              # radial quadrature nodes
+    "ring_quadrature": "sinc",       # kernel sample per ring in the FOM
+                                     #   tables G[w,i] (mdl_core header,
+                                     #   "Ring quadrature"): "sinc" =
+                                     #   analytic ring integral of the
+                                     #   kernel phase ramp -- the physical
+                                     #   staircase (matches RS sub-ring
+                                     #   quadrature and OpticStudio
+                                     #   Huygens, 2026-09-08); "midpoint"
+                                     #   = paper Eq. 4, one sample per
+                                     #   ring, overstates the short lines
+                                     #   (every run before 2026-09-15)
     "efficiency_corr_npz": None,     # path to a rigorous/scalar relative
                                      #   efficiency table (npz: lam_um,
                                      #   r_um, eta = eta_rcwa/eta_tea from
@@ -152,11 +163,17 @@ S3_CONTINUOUS = {
                                   # optimizer, just (re)package that design
     "runs_dir": "runs",           # created under the package root
     "snapshot_scripts": [         # paths relative to the package root
-        "mdl_core_Dev_v1.py",
-        "01_design/run_MDL_design_Dev_v1.py",
+                                  # (missing entries are skipped silently:
+                                  # the _Dev_v1 names listed until
+                                  # 2026-09-15 no longer existed, so no
+                                  # run folder holds the mdl_core that
+                                  # produced it -- fixed here)
+        "mdl_core.py",
+        "01_design/run_MDL_design.py",
         "02_validation_rs/run_verify.py",
+        "02_validation_rs/mtf_verify.py",
         "02_validation_rs/make_plots.py",
-        "02_validation_zemax/mdl_zemax_validation.py",
+        "02_validation_zemax_oo/mdl_zemax_validation.py",
         "03_tapeout/export_gds.py",
     ],
 }
@@ -262,6 +279,8 @@ def main(cfg):
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(scripts_dir,
                                            os.path.basename(fn)))
+        else:
+            print("  (snapshot: %s not found -- skipped)" % fn)
     log("run folder: %s" % os.path.relpath(run_dir))
 
     # ---- alias safety check (continuous mode only) ----------------------
@@ -277,8 +296,10 @@ def main(cfg):
 
     # ---- objective ------------------------------------------------------
     nw = len(lams) if comb_mode else cfg["n_wavelengths"]
+    ring_quad = str(cfg.get("ring_quadrature", "midpoint"))
     prob = MDLProblem(D, na, lmin, lmax, cfg["ring_width_um"],
-                      cfg["h_max_um"], cfg["dh_um"], n_wavelengths=nw)
+                      cfg["h_max_um"], cfg["dh_um"], n_wavelengths=nw,
+                      ring_quadrature=ring_quad)
     if comb_mode:
         prob.set_wavelengths(np.asarray(lams, dtype=float))
         log("objective: discrete comb on %d wavelengths: %s"
@@ -292,6 +313,14 @@ def main(cfg):
         log("softmin objective: beta=%.0f (annealed to %s in the "
             "gradient stage)" % (prob.softmin_beta,
                                  cfg.get("softmin_beta_final")))
+    log("ring quadrature in the FOM tables: %s (%s; rim factor S = %.3f "
+        "at %.0f nm, %.3f at %.0f nm)"
+        % (ring_quad,
+           "analytic ring integral of the kernel phase ramp"
+           if ring_quad == "sinc" else "one kernel sample per ring, paper "
+           "Eq. 4 -- overstates the short lines",
+           prob.S[np.argmin(prob.lam), -1], 1000 * prob.lam.min(),
+           prob.S[np.argmax(prob.lam), -1], 1000 * prob.lam.max()))
     prob.G = prob.G.astype(np.complex64)
     prob.L = prob.L.astype(np.complex64)
     if cfg.get("efficiency_corr_npz"):
@@ -323,6 +352,7 @@ def main(cfg):
 
     # write config (incl. derived values) before the long part
     cfg_out = dict(cfg)
+    cfg_out["ring_quadrature"] = ring_quad     # explicit, even if defaulted
     cfg_out["derived"] = {"na": float(na), "focal_um": float(F),
                           "N_rings": int(prob.N), "M_levels": int(prob.M),
                           "L_max_um": float(L_max),

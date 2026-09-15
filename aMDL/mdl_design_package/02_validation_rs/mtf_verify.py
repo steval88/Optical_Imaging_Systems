@@ -130,9 +130,16 @@ m_file = sys.argv[2] if len(sys.argv) > 2 else os.path.join(run_dir,
                                                             "m_final.npy")
 m = np.load(m_file)
 
+# ring quadrature of the DESIGN FOM tables (mdl_core header "Ring
+# quadrature"): the run's own setting, "midpoint" for run folders that
+# predate the key (2026-09-15), so every J number of an old run stays
+# what design_metrics.json says. Independent of rs_ring_quadrature below
+# (the RS propagation used for the verification metrics).
+FOM_QUAD = str(cfg.get("ring_quadrature", "midpoint"))
 prob = MDLProblem(D, na, lmin, lmax, cfg["ring_width_um"],
                   cfg["h_max_um"], cfg["dh_um"],
-                  n_wavelengths=cfg["n_wavelengths"])
+                  n_wavelengths=cfg["n_wavelengths"],
+                  ring_quadrature=FOM_QUAD)
 if m.size != prob.N:
     raise SystemExit("%s has %d rings; config expects %d"
                      % (m_file, m.size, prob.N))
