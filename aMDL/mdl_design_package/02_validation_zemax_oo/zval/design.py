@@ -147,7 +147,10 @@ class Design:
         seed = {}
         if os.path.exists(dm_path):
             seed = json.load(open(dm_path)).get("seed") or {}
-        if seed.get("mode") == "echelle" or "h_fold_um" in seed:
+        # "ladder" (01_design_oo, 2026-09-16) and "echelle" (pre-refactor)
+        # seed records both carry h_fold_um; a warm start ("init") copies
+        # the source run's fold fields, so it lands here as well
+        if seed.get("mode") in ("ladder", "echelle") or "h_fold_um" in seed:
             h_fold = float(seed["h_fold_um"])
             best = None
             for lam in lams_all:
@@ -159,8 +162,9 @@ class Design:
             ladder = sorted({int(o) for o in seed.get("orders", [])})
             orders = sorted({ladder[0], P, ladder[-1]}) + [0] \
                 if ladder else [P, 0]
-            fold_note = ("echelle seed: h_fold=%.4f um -> P=%d @ %.2f um "
-                         "(detune %.3f)" % (h_fold, P, lam0, det0))
+            fold_note = ("%s seed: h_fold=%.4f um -> P=%d @ %.2f um "
+                         "(detune %.3f)" % (seed.get("mode", "fold"), h_fold,
+                                            P, lam0, det0))
         elif "lam0_um" in seed:
             lam0, P = float(seed["lam0_um"]), int(seed["p"])
             orders = sorted({max(1, P - 4), P, P + 4}) + [0]

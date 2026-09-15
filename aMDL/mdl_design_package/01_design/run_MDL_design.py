@@ -161,6 +161,14 @@ S3_CONTINUOUS = {
     "dll_file_no": 2,             # ring table name: mdl_rings_<n>.txt
     "reuse_design_npy": None,     # path to an existing m.npy: skip the
                                   # optimizer, just (re)package that design
+    "init_design_npy": None,      # path to an existing m.npy: WARM START
+                                  # -- use it instead of the seed and run
+                                  # the full Search/Smooth/Gradient/Polish
+                                  # from there (e.g. re-balance a design
+                                  # under a changed objective such as
+                                  # ring_quadrature; the fold record of
+                                  # the source run folder is carried over
+                                  # so the od validation mode still works)
     "runs_dir": "runs",           # created under the package root
     "snapshot_scripts": [         # paths relative to the package root
                                   # (missing entries are skipped silently:
@@ -234,7 +242,13 @@ S3_COMB_SOFTMIN = dict(S3_COMB,
                        overlap_fom=True,
                        dll_file_no=6)
 
-SETTINGS = S3_COMB_SOFTMIN        # <-- EDIT: pick / customize a dictionary
+S3_COMB_SOFTMIN_A1 = dict(S3_COMB_SOFTMIN,
+                        name="s3_comb_softmin_a1",
+                        ring_quadrature="sinc", 
+                        overlap_airy_factor=1.0,
+                        dll_file_no=7)
+
+SETTINGS = S3_COMB_SOFTMIN_A1        # <-- EDIT: pick / customize a dictionary
 
 # =========================================================================
 # no user-serviceable parts below
@@ -382,7 +396,26 @@ def main(cfg):
             % (cfg["reuse_design_npy"], f_f))
     else:
         seed_mode = cfg.get("seed_mode", "harmonic")
-        if seed_mode == "echelle":
+        if cfg.get("init_design_npy"):
+            src = cfg["init_design_npy"]
+            m_init = np.asarray(np.load(src), dtype=np.int64)
+            if m_init.size != prob.N:
+                raise SystemExit("init error: %s has %d rings, config needs "
+                                 "%d" % (src, m_init.size, prob.N))
+            best = (m_init, prob.fom(m_init), ("init", src))
+            seed_record = {"mode": "init", "init_from": os.path.abspath(src)}
+            src_dm = os.path.join(os.path.dirname(os.path.abspath(src)),
+                                  "design_metrics.json")
+            if os.path.exists(src_dm):
+                src_seed = json.load(open(src_dm)).get("seed") or {}
+                for k in ("h_fold_um", "orders", "lam0_um", "p"):
+                    if k in src_seed:
+                        seed_record[k] = src_seed[k]
+                seed_record["source_seed_mode"] = src_seed.get("mode")
+            log("warm start from %s: J=%.4f under THIS run's objective "
+                "(levels %d..%d used)" % (src, best[1], m_init.min(),
+                                          m_init.max()))
+        elif seed_mode == "echelle":
             if not comb_mode:
                 raise SystemExit("seed_mode 'echelle' needs a discrete "
                                  "target_wavelengths_um list (the blaze "

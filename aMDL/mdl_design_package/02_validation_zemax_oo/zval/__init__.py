@@ -48,6 +48,6 @@ Module map
     report.py      section banners and the figures
     zone.py, od.py, rz.py, huygens.py   one Analysis class per mode
 """
-SCRIPT_VERSION = "2026-09-15.03"     # bumped at every delivery; echoed
+SCRIPT_VERSION = "2026-09-16.01"     # bumped at every delivery; echoed
                                      # in the configuration section so a
                                      # stale copy is visible at a glance
