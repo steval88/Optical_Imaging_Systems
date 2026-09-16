@@ -107,3 +107,55 @@ package supplies the connection and the log).
   `Only these orders` bitmask; coating files must be UTF-8.
 * Depth for RCWA is the PHYSICAL relief height (the (n − 1) scaling is
   the phase, not the geometry) — corrected here against an earlier note.
+
+## Probe log (OpticStudio 2024 R1, 2026-09-16, first real run)
+
+* `ZOSAPI.Editors.NCE.ObjectType` lists `DiffractionGrating`,
+  `UserDefinedObject`, `SourceEllipse`, `DetectorRectangle`,
+  `RectangularVolumeGrating`, `RectangularPipeGrating`, `SourceDiffractive`
+  (names as spelled by the API; 140 object types in all).
+* `ObjectColumn` has `Par1`…`Par250` plus `Comment, Material, RefObject,
+  InsideOf, XPosition, YPosition, ZPosition, TiltX, TiltY, TiltZ`.
+* `DiffractionSplitType` = `DontSplitByOrder, SplitByTable, SplitByDLL`
+  (NOT `SplitByDLLFunction`; adapter order fixed, mock renamed).
+* Diffraction Grating Par 11 (Diffract Order) is a DOUBLE cell: the
+  `IntegerValue` setter raises `Expected Integer, got 'Double'`. The
+  adapter now reads `cell.DataType` and uses the matching setter (nscval
+  2026-09-16.02). Sections 3–5 of the probe still to be seen.
+* Second probe run (nscval .02) reached the end. `IDiffractionData`
+  members: `DLL, GetAvailableDLLs, Split, StartOrder, StopOrder,
+  NumberOfParameters, IsDLLRequired, IsDiffractionAvailable,
+  Get/SetReflectParameterValue, Get/SetTransmitParameterValue,
+  GetReflectParameterName, GetTransmitParamaterName` (sic). No `Face`
+  member (one tab per object). The manual's `SplitType / SetTransmitValue /
+  GetParameterName` do not exist → adapter rewritten on the real names
+  (nscval 2026-09-16.03), mock aligned. The "0 parameter labels" line of
+  that run was the old name getter finding nothing, not an empty DLL.
+* NSC ray trace tool: `SplitNSCRays, ScatterNSCRays, UsePolarization,
+  IgnoreErrors, ClearDetectors, RunAndWaitForCompletion, GetTotalRayEnergy,
+  NumberOfCores, RayMultiplier, SetRandomSeed/ResetRandomSeed, SaveRays`.
+  NCE readers: `GetDetectorData, GetAllDetectorData(Safe),
+  GetDetectorDimensions, GetDetectorSize, GetCoherentData`.
+* `{Documents}\Zemax\DLL\Diffractive` (24 entries): srg_blaze_RCWA,
+  srg_step_RCWA, srg_step2/3_RCWA, srg_trapezoid(2)_RCWA,
+  srg_user_defined_RCWA, srg_GridWirePolarizer_RCWA, hologram_kogelnik,
+  Diff2DSample, diff_samp_1, lumerical-sub-wavelength (2023R2, 2024R1).
+  No `user_grating_data_*.txt` sample present → rung 4 needs the profile
+  file format from the srg_user_defined manual page.
+* Third probe (nscval .03): the tab works end to end — `Split` →
+  SplitByDLL, DLL set and verified, 23 labels read, slot 1 written and
+  read back on both columns, `GetAvailableDLLs` lists 14 DLLs. Cell
+  types: source rays Integer, source distance Double, grating Lines/µm
+  and Diffract Order Double, detector pixels Integer.
+* THE SLOT MAP OF 2026-09-02 WAS SHIFTED BY ONE: the srg DLLs have no
+  period slot (slot 1 = Max Order, 2 = Unused, 3 = Fill factor, 4 = Alpha,
+  5 = Beta, 6/7 = Coat thick top/side, 8 = # Layer, 9 = Use Coating File,
+  10–15 = Index Grate/Env/Coat (R,I), 16 = Rotate, 17 = Interpolation,
+  18 = Test Mode, 19 = Only these orders, 20 = Stochastic, 21 = Coat mode,
+  22 = NIL Thick). The period comes from the OBJECT's Lines/µm (Par 10 =
+  1/P). With the old map the null test would have written P = 50 into
+  Max Order and the ladder P = 90 (> the cap of 50). nscval 2026-09-16.04
+  resolves every key against the live labels (`dlls.resolve`), echoes
+  Par 10 next to the slots and refuses `period_um` as a slot key. The
+  step-DLL labels on file are PROVISIONAL until the next probe lists
+  them (the probe now prints the labels of every srg_*.dll).

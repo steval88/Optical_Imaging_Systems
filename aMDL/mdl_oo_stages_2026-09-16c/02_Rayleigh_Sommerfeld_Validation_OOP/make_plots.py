@@ -23,10 +23,21 @@ from rsval.plots import PlotRun                              # noqa: E402
 
 
 def main(argv: Sequence[str] = tuple(sys.argv)) -> None:
-    run_dir, m_file = parse_cli(argv, "make_plots.py")
+    """``make_plots.py runs/<run> [other_m.npy] [--cmap NAME]``: NAME is any
+    matplotlib colormap for the intensity images (default OrRd, the
+    paper's white-to-red tiles; inferno / magma for a dark background)."""
+    args = list(argv)
+    cmap = PlotRun.DEFAULT_CMAP
+    if "--cmap" in args:
+        i = args.index("--cmap")
+        if i + 1 >= len(args):
+            raise SystemExit("--cmap needs a matplotlib colormap name")
+        cmap = args[i + 1]
+        del args[i:i + 2]
+    run_dir, m_file = parse_cli(args, "make_plots.py")
     log = Log()
     log("rsval %s" % __version__)
-    PlotRun(DesignState(run_dir, m_file), log).run(script_path=os.path.abspath(__file__))
+    PlotRun(DesignState(run_dir, m_file), log, cmap=cmap).run(script_path=os.path.abspath(__file__))
 
 
 if __name__ == "__main__":

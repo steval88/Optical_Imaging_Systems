@@ -56,13 +56,15 @@ class NullTest(NscAnalysis):
                             s["detector_pixels"])
         tab = DiffractionTab(S, gr)
         tab.use_dll(s["dll"], s["orders"][0], s["orders"][-1])
-        vals = slots(s["dll"], period_um=s["period_um"], max_order=s["max_order"],
+        names = tab.names()                       # live labels -> slot resolution
+        vals = slots(s["dll"], names, max_order=s["max_order"],
                      fill=s["fill"], alpha_deg=s["alpha_deg"], beta_deg=s["beta_deg"],
                      index_grate_r=s["n_grate"], index_grate_i=0.0,
                      index_env_r=s["n_env"], index_env_i=0.0, n_layer=1,
                      interpolation=0, stochastic=0, only_orders=0)
         tab.set_slots(vals)
-        names = tab.names()
+        log("  object Par 10 (Lines/um)          = %g   (period %.1f um; the srg DLLs take "
+            "the period from the object, not from a slot)" % (1.0 / s["period_um"], s["period_um"]))
         log("DLL %s: blaze depth %.4f um -> alpha %.4f deg (beta %.0f, fill %.1f); "
             "Index Grate %.3f, Env %.3f; Max Order %d"
             % (s["dll"], s["depth_um"], s["alpha_deg"], s["beta_deg"], s["fill"],

@@ -50,6 +50,6 @@ Module map
                   <run>/nsc/<stamp>_<mode>, run_info.json, ZOS session
     probe.py, nulltest.py, ladder.py   one class per mode
 """
-SCRIPT_VERSION = "2026-09-16.01"
+SCRIPT_VERSION = "2026-09-16.04"
 
 __all__ = ["SCRIPT_VERSION"]

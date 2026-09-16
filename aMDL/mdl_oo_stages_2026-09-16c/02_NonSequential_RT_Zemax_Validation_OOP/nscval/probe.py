@@ -56,14 +56,35 @@ class Probe(NscAnalysis):
             try:
                 from .nsc import DiffractionTab
                 tab = DiffractionTab(S, obj)
+                log("tab state before: %s" % tab.flags())
+                avail = tab.available_dlls()
+                log("GetAvailableDLLs (%d): %s" % (len(avail), ", ".join(avail) or "none / no such member"))
                 tab.use_dll(PROBE_SETTINGS["dll"], -1, 1)
+                log("tab state after use_dll: %s" % tab.flags())
                 names = tab.names()
                 log("DLL %s: %d parameter labels in slot order:" % (PROBE_SETTINGS["dll"],
                                                                     len(names)))
                 for i, n in enumerate(names, 1):
                     log("  slot %2d  %s" % (i, n))
+                # write / read back one slot each way (slot 1 = Max Order on the srg DLLs)
+                tab.set_slot(1, 12.0)
+                log("slot 1 written 12 -> read back (transmit, reflect) = %s" % (tab.get_slot(1),))
+                # the labels of every other srg DLL, verbatim, for nscval/dlls.py
+                for other in avail:
+                    if other.lower().startswith("srg_") and other != PROBE_SETTINGS["dll"]:
+                        tab.use_dll(other, 0, 0)
+                        labs = tab.names()
+                        log("labels of %s (%d): %s" % (other, len(labs),
+                                                        " | ".join("%d:%s" % (i + 1, x) for i, x in enumerate(labs))))
             except SystemExit as exc:
                 log("DiffractionTab adapter stopped: %s" % exc)
+        # editor cell storage types, for the record (integer vs double setters)
+        src, det = S.NCE.GetObjectAt(S.objects["source"]), S.NCE.GetObjectAt(S.objects["detector"])
+        for label, o, k in (("source Par1 (layout rays)", src, 1), ("source Par2 (analysis rays)", src, 2),
+                            ("source Par8 (source distance)", src, 8), ("grating Par10 (lines/um)", obj, 10),
+                            ("grating Par11 (diffract order)", obj, 11), ("detector Par3 (# x pixels)", det, 3)):
+            cell = o.GetObjectCell(getattr(Z.Editors.NCE.ObjectColumn, "Par%d" % k))
+            log("  cell type %-32s %s" % (label, getattr(cell, "DataType", "n/a")))
 
         log.section("ray trace tool and detector readers")
         tool = S.TheSystem.Tools.OpenNSCRayTrace()

@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-VERSION = "2026-09-16.02"
+VERSION = "2026-09-16.04"
 
 HERE = os.path.dirname(os.path.abspath(__file__))          # .../rsval
 STAGE_DIR = os.path.dirname(HERE)                           # 02_Rayleigh_Sommerfeld_Validation_OOP

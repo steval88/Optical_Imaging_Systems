@@ -17,7 +17,7 @@ placed by absolute z (RefObject 0).
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -111,12 +111,32 @@ class NscSystem:
         return obj
 
     def par(self, obj: Any, k: int, value: float, integer: bool = False) -> None:
-        """Object parameter k (1-based ObjectColumn.Par<k>)."""
+        """Object parameter k (1-based ObjectColumn.Par<k>).
+
+        The editor cell carries its own storage type (``cell.DataType``:
+        Integer, Double, String, ...) and refuses the other setter with
+        'Expected Integer, got Double' (probe of 2026-09-16: the Diffraction
+        Grating's Diffract Order, Par 11, is a Double cell although it holds
+        an integer). So the cell type wins; `integer` is only the fallback
+        when the cell does not report a type (the mock), and the other
+        setter is tried when the first one is refused."""
         cell = obj.GetObjectCell(getattr(self._col, "Par%d" % k))
-        if integer:
-            cell.IntegerValue = int(value)
-        else:
+        dtype = str(getattr(cell, "DataType", "") or "")
+        if "Integer" in dtype:
+            cell.IntegerValue = int(round(value))
+            return
+        if "Double" in dtype:
             cell.DoubleValue = float(value)
+            return
+        setters: List[Tuple[str, Union[int, float]]] = [("IntegerValue", int(round(value))),
+                                                         ("DoubleValue", float(value))]
+        if not integer:
+            setters.reverse()
+        first, second = setters
+        try:
+            setattr(cell, first[0], first[1])
+        except Exception:                                  # wrong setter for this cell
+            setattr(cell, second[0], second[1])
 
     def add_source_ellipse(self, z_mm: float, half_x_mm: float, half_y_mm: float,
                            rays: int, layout_rays: int, power_w: float) -> Any:
@@ -181,7 +201,18 @@ class DiffractionTab:
     Transmit column, as the srg DLLs require. ``names()`` returns the
     labels in slot order so a run can echo them next to the values.
     """
-    SPLIT_BY_DLL = ("SplitByDLLFunction", "SplitByDLL")
+    SPLIT_BY_DLL = ("SplitByDLL", "SplitByDLLFunction")   # real name first (probe 2026-09-16)
+    # member names as the probe of 2026-09-16 (OpticStudio 2024 R1) lists
+    # them on IDiffractionData, first; the manual's spellings follow as
+    # fallbacks. Note the API's own typo "GetTransmitParamaterName".
+    SPLIT_ATTR = ("Split", "SplitType")
+    DLL_ATTR = ("DLL", "DLLName", "DllName")
+    NAME_GETTERS = ("GetTransmitParamaterName", "GetTransmitParameterName",
+                    "GetReflectParameterName", "GetParameterName", "GetParamName")
+    T_SETTERS = ("SetTransmitParameterValue", "SetTransmitValue", "SetTransmitParameter")
+    R_SETTERS = ("SetReflectParameterValue", "SetReflectValue", "SetReflectParameter")
+    T_GETTERS = ("GetTransmitParameterValue", "GetTransmitValue")
+    R_GETTERS = ("GetReflectParameterValue", "GetReflectValue")
 
     def __init__(self, sysm: NscSystem, obj: Any, face: int = 0) -> None:
         self.sysm = sysm
@@ -194,8 +225,56 @@ class DiffractionTab:
         try:
             m.set(self.data, "diffraction face", ("Face",), int(face))
         except SystemExit:
-            pass                                    # single-face objects
+            pass                                    # no Face member (2024 R1): one tab per object
 
+    # -- discovery ---------------------------------------------------------------
+    def available_dlls(self) -> List[str]:
+        """The DLL names OpticStudio itself offers in the Diffraction tab
+        (``GetAvailableDLLs``), or [] when the API has no such list."""
+        d = self.data
+        if not hasattr(d, "GetAvailableDLLs"):
+            return []
+        try:
+            return [str(x) for x in d.GetAvailableDLLs()]
+        except Exception:
+            return []
+
+    def resolve_dll(self, dll: str) -> str:
+        """The exact string OpticStudio expects for `dll`: matched case-
+        insensitively, with or without the .dll extension, against the
+        available list; `dll` itself when there is no list to check."""
+        avail = self.available_dlls()
+        if not avail:
+            return dll
+        want = dll.lower()
+        stem = want[:-4] if want.endswith(".dll") else want
+        for name in avail:
+            low = name.lower()
+            if low == want or low == stem or low == stem + ".dll":
+                return name
+        raise SystemExit("DLL %r is not among the Diffraction-tab DLLs OpticStudio lists: %s"
+                         % (dll, ", ".join(avail)))
+
+    def flags(self) -> Dict[str, Any]:
+        """Read-only tab state for the log: DLL, split, orders, parameter
+        count and the availability flags, whatever the API exposes."""
+        d = self.data
+        out: Dict[str, Any] = {}
+        for key, cands in (("dll", self.DLL_ATTR), ("split", self.SPLIT_ATTR),
+                           ("start_order", ("StartOrder",)), ("stop_order", ("StopOrder",)),
+                           ("n_params", ("NumberOfParameters", "NumberOfParams")),
+                           ("is_dll_required", ("IsDLLRequired",)),
+                           ("is_diffraction_available", ("IsDiffractionAvailable",))):
+            for name in cands:
+                if hasattr(d, name):
+                    try:
+                        out[key] = str(getattr(d, name))
+                    except Exception as exc:
+                        out[key] = "<%s>" % exc
+                    break
+        return out
+
+    # -- configuration -----------------------------------------------------------
     def use_dll(self, dll: str, start: int, stop: int) -> None:
         m, ZOSAPI, d = self.sysm.members, self.sysm.ZOSAPI, self.data
         enum = getattr(ZOSAPI.Editors.NCE, "DiffractionSplitType", None)
@@ -207,10 +286,14 @@ class DiffractionTab:
                     break
         if split is None:
             split = 2                               # DontSplit 0, Table 1, DLL 2
-        m.set(d, "split type", ("SplitType", "Split"), split)
-        m.set(d, "dll name", ("DLL", "DLLName", "DllName"), dll)
+        m.set(d, "split type", self.SPLIT_ATTR, split)
+        name = self.resolve_dll(dll)
+        m.set(d, "dll name", self.DLL_ATTR, name)
         m.set(d, "start order", ("StartOrder",), int(start))
         m.set(d, "stop order", ("StopOrder",), int(stop))
+        got = self.flags().get("dll", "")
+        if got and got.lower() != name.lower():
+            raise SystemExit("Diffraction DLL did not take: set %r, tab reads %r" % (name, got))
 
     def set_orders(self, start: int, stop: int) -> None:
         self.sysm.members.set(self.data, "start order", ("StartOrder",), int(start))
@@ -224,9 +307,10 @@ class DiffractionTab:
         return 40                                   # probe by name errors
 
     def names(self) -> List[str]:
+        """The DLL's parameter labels in slot order (1-based slots)."""
         d = self.data
         getter = None
-        for name in ("GetParameterName", "GetParamName", "ParameterName"):
+        for name in self.NAME_GETTERS:
             if hasattr(d, name):
                 getter = getattr(d, name)
                 break
@@ -240,30 +324,32 @@ class DiffractionTab:
                 break
         return out
 
+    def _call_first(self, cands: Sequence[str], *args: Any) -> Optional[Any]:
+        d = self.data
+        for name in cands:
+            if hasattr(d, name):
+                return getattr(d, name)(*args)
+        return None
+
+    def get_slot(self, slot: int) -> Tuple[Optional[float], Optional[float]]:
+        """(transmit, reflect) value of one parameter slot, None if unreadable."""
+        t = self._call_first(self.T_GETTERS, int(slot))
+        r = self._call_first(self.R_GETTERS, int(slot))
+        return (None if t is None else float(t), None if r is None else float(r))
+
     def set_slot(self, slot: int, value: float) -> None:
-        """Write one parameter slot (1-based) to Reflect AND Transmit."""
+        """Write one parameter slot (1-based) to Transmit AND Reflect."""
         d = self.data
         done = 0
-        for setter in ("SetTransmitValue", "SetTransmitParameter", "SetTransmitParam"):
-            if hasattr(d, setter):
-                getattr(d, setter)(int(slot), float(value))
-                done += 1
-                break
-        for setter in ("SetReflectValue", "SetReflectParameter", "SetReflectParam"):
-            if hasattr(d, setter):
-                getattr(d, setter)(int(slot), float(value))
-                done += 1
-                break
-        if done == 0:
-            # generic accessor pattern: SetParameterValue(index, isTransmit, value)?
-            for setter in ("SetParameterValue", "SetValue"):
+        for cands in (self.T_SETTERS, self.R_SETTERS):
+            for setter in cands:
                 if hasattr(d, setter):
                     getattr(d, setter)(int(slot), float(value))
-                    done = 1
+                    done += 1
                     break
         if done == 0:
             self.sysm.members.get(d, "diffraction parameter setter",
-                                  ("SetTransmitValue",))   # raises with dir()
+                                  (self.T_SETTERS[0],))   # raises with dir()
 
     def set_slots(self, values: Dict[int, float]) -> None:
         for k in sorted(values):

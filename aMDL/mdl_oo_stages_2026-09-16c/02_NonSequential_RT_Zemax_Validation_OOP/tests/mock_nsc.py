@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 from nscval import tea                                  # noqa: E402
-from nscval.dlls import SLOT_MAPS                       # noqa: E402
+from nscval.dlls import LABELS, resolve                 # noqa: E402
 
 
 class Cell:
@@ -26,27 +26,31 @@ class Cell:
 
 class DiffractionData:
     def __init__(self) -> None:
-        self.SplitType = 0
+        self.Split = 0
         self.DLL = ""
         self.StartOrder = 0
         self.StopOrder = 0
-        self.Face = 0
         self.NumberOfParameters = 23
         self.t: Dict[int, float] = {}
         self.r: Dict[int, float] = {}
 
-    def GetParameterName(self, i: int) -> str:
-        m = SLOT_MAPS.get(self.DLL, {})
-        inv = {v: k for k, v in m.items()}
-        return inv.get(i, "param %d" % i)
+    def GetAvailableDLLs(self):
+        return list(LABELS)
 
-    def SetTransmitValue(self, i: int, v: float) -> None:
+    def GetTransmitParamaterName(self, i: int) -> str:   # sic: the API's spelling
+        labs = LABELS.get(self.DLL, [])
+        return labs[i - 1] if 0 < i <= len(labs) else ""
+
+    def SetTransmitParameterValue(self, i: int, v: float) -> None:
         self.t[i] = v
 
-    def SetReflectValue(self, i: int, v: float) -> None:
+    def SetReflectParameterValue(self, i: int, v: float) -> None:
         self.r[i] = v
 
-    def GetTransmitValue(self, i: int) -> float:
+    def GetReflectParameterValue(self, i: int) -> float:
+        return self.r[i]
+
+    def GetTransmitParameterValue(self, i: int) -> float:
         return self.t.get(i, 0.0)
 
 
@@ -139,8 +143,8 @@ class System:
         power = src.GetObjectCell("Par3").DoubleValue
         d = grating.DiffractionData
         lam = self.SystemData.Wavelengths.GetWavelength(1).Wavelength
-        m = SLOT_MAPS[d.DLL]
-        P = d.t[m["period_um"]]
+        m = resolve(LABELS[d.DLL], d.DLL)
+        P = 1.0 / grating.GetObjectCell("Par10").DoubleValue      # the object's Lines/um
         n = d.t[m["index_grate_r"]]
         n_env = d.t[m["index_env_r"]]
         orders = list(range(d.StartOrder, d.StopOrder + 1))
@@ -167,7 +171,7 @@ class MockSession:
                                        DetectorRectangle="DetectorRectangle"),
             ObjectColumn=SimpleNamespace(**{"Par%d" % i: "Par%d" % i for i in range(1, 31)}),
             DiffractionSplitType=SimpleNamespace(DontSplitByOrder=0, SplitByTable=1,
-                                                 SplitByDLLFunction=2))
+                                                 SplitByDLL=2))   # real name (probe 2026-09-16)
         self.ZOSAPI = SimpleNamespace(Editors=SimpleNamespace(NCE=nce))
         self.TheSystem = System()
         self.app = SimpleNamespace(ZOSAPI=self.ZOSAPI, TheSystem=self.TheSystem)

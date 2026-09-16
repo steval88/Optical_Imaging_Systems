@@ -10,14 +10,16 @@ top level are read transparently: subfolder first, root fallback).
                        the ideal-lens PSF of the same aperture, one panel
                        per line (radial, normalized to the ideal peak ->
                        the panel shows the Strehl-like ratio directly)
-    fig_rz_tiles.png   I(r, z) tiles per wavelength, mirrored to +/-r,
-                       each tile normalized to its own peak (Fig. 2e / 4a)
+    fig_rz_tiles.png   I(r, z) tiles per wavelength in ONE ROW, mirrored
+                       to +/-r, shared absolute z axis (F dashed), each
+                       tile normalized to its own peak, one colour bar
+                       (paper Fig. 2e layout, OrRd by default)
     fig_metrics.png    the scalar metrics vs wavelength: focus offset,
                        FWHM vs the diffraction limit, eff / Strehl-like,
                        shape-Strehl, and the MTF quality when
                        verify_mtf.npz exists
     fig_psf_2d.png     the focal spots as 2-D images (revolved radial
-                       profiles), one per wavelength, common scale
+                       profiles), one row, one per wavelength, common scale
 
 The design itself is not re-propagated except for the ideal-lens
 reference profiles of fig_psf (RSPropagator.ideal_profile on the
@@ -67,13 +69,31 @@ class RsFiles:
 
 
 class PlotRun(Stage):
-    """All figures of a run folder."""
+    """All figures of a run folder.
 
-    def __init__(self, design: DesignState, log: Optional[Log] = None) -> None:
+    Attributes
+    ----------
+    d          the design state (config, geometry, wavelengths)
+    files      locator of the rs/ products (subfolder first, root fallback)
+    lams       the wavelengths of the run [um]
+    cmap       matplotlib colormap of the intensity images (fig_psf_2d,
+               fig_rz_tiles). Default "OrRd": white background, orange to
+               dark red, the paper's Fig. 2e / 4a convention and the look
+               of the legacy make_plots.py. Any matplotlib name works
+               ("inferno", "magma", "viridis", ...); echoed in the log.
+    line_cmap  colormap of the per-wavelength line colours ("turbo").
+    written    file names written so far (rs/)
+    """
+    DEFAULT_CMAP = "OrRd"
+
+    def __init__(self, design: DesignState, log: Optional[Log] = None,
+                 cmap: str = DEFAULT_CMAP, line_cmap: str = "turbo") -> None:
         super().__init__(design.run_dir, log)
         self.d = design
         self.files = RsFiles(design.run_dir)
         self.lams: FloatVec = design.lams
+        self.cmap: str = cmap
+        self.line_cmap: str = line_cmap
         self.written: List[str] = []
 
     # -- helpers -----------------------------------------------------------------
@@ -84,7 +104,7 @@ class PlotRun(Stage):
         return plt
 
     def _colors(self, plt: Any) -> List[Any]:
-        cmap = plt.get_cmap("turbo")
+        cmap = plt.get_cmap(self.line_cmap)
         n = self.lams.size
         return [cmap(i / max(n - 1, 1)) for i in range(n)]
 
@@ -192,30 +212,36 @@ class PlotRun(Stage):
             return None
         plt = self._plt()
         n = len(prof["I"])
-        ncol = min(7, n)
-        nrow = int(np.ceil(n / ncol))
         r = prof["r"]
         x = np.linspace(-r[-1], r[-1], 2 * r.size - 1)
         X, Y = np.meshgrid(x, x)
         RR = np.hypot(X, Y)
         peak = max(float(I.max()) for I in prof["I"].values())
-        fig, axes = plt.subplots(nrow, ncol, figsize=(2.3 * ncol, 2.4 * nrow), squeeze=False)
+        # one row, one spot per wavelength, common intensity scale
+        fig, axes = plt.subplots(1, n, figsize=(max(6.0, 1.35 * n + 1.6), 2.6), squeeze=False)
+        im = None
         for k, (lam, I) in enumerate(prof["I"].items()):
-            ax = axes[k // ncol, k % ncol]
+            ax = axes[0, k]
             img = np.interp(RR, r, I, right=0.0)
-            ax.imshow(img / peak, extent=(x[0], x[-1], x[0], x[-1]), cmap="inferno", vmin=0, vmax=1)
-            ax.set_title("%d nm" % int(lam * 1000), fontsize=8)
+            im = ax.imshow(img / peak, extent=(x[0], x[-1], x[0], x[-1]), cmap=self.cmap,
+                           vmin=0, vmax=1)
+            ax.set_title("%d nm" % int(lam * 1000), fontsize=9)
             ax.set_xticks([]); ax.set_yticks([])
-        for k in range(n, nrow * ncol):
-            axes[k // ncol, k % ncol].axis("off")
+        fig.subplots_adjust(left=0.02, right=0.955, top=0.74, bottom=0.04, wspace=0.08)
+        if im is not None:
+            cax = fig.add_axes([0.963, 0.06, 0.008, 0.66])
+            fig.colorbar(im, cax=cax).set_label("I / max over lines", fontsize=8)
+            cax.tick_params(labelsize=7)
         fig.suptitle("MDL '%s': focal spots at z = F (common scale, +/-%.0f um)"
                      % (self.d.cfg.name, r[-1]), fontsize=10)
-        fig.tight_layout()
         path = self._save(fig, "fig_psf_2d.png")
         plt.close(fig)
         return path
 
     def fig_rz_tiles(self, prof: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """I(r, z) tiles, ONE ROW, one tile per wavelength (paper Fig. 2e
+        layout): shared z axis in absolute mm (F dashed), r mirrored to
+        +/-r_max, each tile normalized to its own peak, one colour bar."""
         prof = prof or self._focal_profiles()
         if prof is None:
             self.log("verify_rzmap.npz missing -- fig_rz_tiles skipped")
@@ -224,25 +250,33 @@ class PlotRun(Stage):
         F = self.d.F
         r, zg = prof["r"], prof["zgrid"]
         n = len(prof["maps"])
-        ncol = min(7, n)
-        nrow = int(np.ceil(n / ncol))
-        fig, axes = plt.subplots(nrow, ncol, figsize=(2.4 * ncol, 3.2 * nrow), squeeze=False)
+        fig, axes = plt.subplots(1, n, figsize=(max(6.0, 1.35 * n + 1.6), 4.2),
+                                 sharey=True, squeeze=False)
+        im = None
         for k, (lam, M) in enumerate(prof["maps"].items()):
-            ax = axes[k // ncol, k % ncol]
+            ax = axes[0, k]
             tile = np.hstack([M[:, :0:-1], M])
-            ax.imshow(tile / tile.max(), origin="lower", aspect="auto", cmap="inferno",
-                      extent=(-r[-1], r[-1], (zg[0] - F) / 1000, (zg[-1] - F) / 1000))
-            ax.axhline(0, color="w", lw=0.5, ls=":")
-            ax.set_title("%d nm" % int(lam * 1000), fontsize=8)
-            ax.set_xlabel("r (um)", fontsize=7)
-            if k % ncol == 0:
-                ax.set_ylabel("z - F (mm)", fontsize=7)
-            ax.tick_params(labelsize=6)
-        for k in range(n, nrow * ncol):
-            axes[k // ncol, k % ncol].axis("off")
-        fig.suptitle("MDL '%s': I(r, z) around the design focus, each tile normalized "
-                     "(paper Fig. 2e / 4a)" % self.d.cfg.name, fontsize=10)
-        fig.tight_layout()
+            im = ax.imshow(tile / tile.max(), origin="lower", aspect="auto", cmap=self.cmap,
+                           vmin=0, vmax=1,
+                           extent=(-r[-1], r[-1], zg[0] / 1000, zg[-1] / 1000))
+            ax.axhline(F / 1000, color="k" if self.cmap in ("OrRd", "Reds", "YlOrRd", "Greys")
+                       else "w", lw=0.8, ls="--")
+            ax.set_title("%d nm" % int(lam * 1000), fontsize=9)
+            ax.set_xticks([-r[-1], 0, r[-1]])
+            if k == 0:
+                ax.set_xlabel("r (um)", fontsize=9)
+                ax.set_ylabel("z (mm)", fontsize=9)
+                ax.tick_params(labelsize=8)
+            else:
+                ax.set_xticklabels([])
+                ax.tick_params(axis="y", length=0)
+        fig.subplots_adjust(left=0.05, right=0.955, top=0.80, bottom=0.16, wspace=0.12)
+        if im is not None:
+            cax = fig.add_axes([0.963, 0.16, 0.008, 0.64])
+            fig.colorbar(im, cax=cax).set_label("I / per-tile max", fontsize=8)
+            cax.tick_params(labelsize=7)
+        fig.suptitle("Intensity I(r, z) around the focus -- %s (paper Fig. 2e convention, "
+                     "F = %.3f mm dashed)" % (self.d.cfg.name, F / 1000), fontsize=10)
         path = self._save(fig, "fig_rz_tiles.png")
         plt.close(fig)
         return path
@@ -315,6 +349,8 @@ class PlotRun(Stage):
     def run(self, script_path: Optional[str] = None) -> List[str]:
         self.snapshot(script_path)
         self.d.describe(self.log, m_line=False)
+        self.log("image colormap %s (fig_psf_2d, fig_rz_tiles), line colours %s"
+                 % (self.cmap, self.line_cmap))
         self.log("reading %s" % (os.path.relpath(os.path.dirname(self.files.path("verify_metrics.json") or ""))))
         self.fig_onaxis()
         prof = self._focal_profiles()

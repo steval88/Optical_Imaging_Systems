@@ -26,7 +26,7 @@ import numpy as np
 
 from . import tea
 from .base import PKG_ROOT, NscAnalysis
-from .dlls import SLOT_MAPS, slots
+from .dlls import slot_of, slots
 from .nsc import DiffractionTab, NscSystem, NscTrace, order_geometry
 from .settings import LADDER_SETTINGS, TRACE_SETTINGS
 
@@ -119,7 +119,7 @@ class TeaLadder(NscAnalysis):
                         % (lam, p0, P))
                     continue
                 S.set_wavelength(lam)
-                tab.set_slots(slots(s["dll"], period_um=P, max_order=s["max_order"],
+                tab.set_slots(slots(s["dll"], names, max_order=s["max_order"],
                                     depth_um=d, n_steps=N,
                                     layers_per_step=s["layers_per_step"],
                                     alpha_deg=s["alpha_deg"], index_grate_r=n,
@@ -127,8 +127,9 @@ class TeaLadder(NscAnalysis):
                                     index_env_i=0.0, interpolation=0, stochastic=0,
                                     only_orders=0))
                 if ic == 0 and il == 0:
-                    for k, v in sorted(slots(s["dll"], period_um=P, depth_um=d, n_steps=N,
-                                             index_grate_r=n).items()):
+                    log("  object Par 10 (Lines/um)          = %g   (period %.1f um)" % (1.0 / P, P))
+                    for k, v in sorted(slots(s["dll"], names, max_order=s["max_order"], depth_um=d,
+                                             n_steps=N, index_grate_r=n).items()):
                         log("  slot %2d %-22s = %g" % (k, names[k - 1] if k <= len(names)
                                                         else "?", v))
                 ref = tea.staircase_orders(N, p, [abs(m) for m in orders])
@@ -146,7 +147,7 @@ class TeaLadder(NscAnalysis):
                        row[j0] / max(ref[j0], 1e-9), sum(row), ref.sum(),
                        sum(row) / max(ref.sum(), 1e-9)))
                 if ic == 0 and il == 0 and s.get("convergence_max_order"):
-                    slot_mo = SLOT_MAPS[s["dll"]]["max_order"]
+                    slot_mo = slot_of(s["dll"], "max_order", names)
                     tab.set_slot(slot_mo, float(s["convergence_max_order"]))
                     tab.set_orders(orders[j0], orders[j0])
                     trace.run()
