@@ -13,8 +13,18 @@ The full-pipeline replay (S3 softmin config, rng_seed 7) was done on
 import os, sys, time
 import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
-PKG = os.path.dirname(os.path.dirname(HERE))          # mdl_design_package
-sys.path.insert(0, PKG); sys.path.insert(0, os.path.dirname(HERE))
+PKG = os.path.dirname(os.path.dirname(HERE))          # the package root
+# the frozen mdl_core.py: at this package root, or in the frozen
+# mdl_design_package next to an OOP package, or under MDL_LEGACY_ROOT
+for _cand in ([os.environ["MDL_LEGACY_ROOT"]] if os.environ.get("MDL_LEGACY_ROOT") else []) + \
+        [PKG, os.path.join(os.path.dirname(PKG), "mdl_design_package")]:
+    if os.path.exists(os.path.join(_cand, "mdl_core.py")):
+        sys.path.insert(0, _cand)
+        break
+else:
+    raise SystemExit("mdl_core.py not found next to this package nor in ../mdl_design_package; "
+                     "set MDL_LEGACY_ROOT")
+sys.path.insert(0, os.path.dirname(HERE))
 import mdl_core as old                                 # the frozen original
 import mdl
 from mdl import compat

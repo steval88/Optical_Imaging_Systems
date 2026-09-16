@@ -24,9 +24,27 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PKG_ROOT = os.path.dirname(os.path.dirname(HERE))
-LEGACY = os.path.join(PKG_ROOT, "02_validation_rs")
-NEW = os.path.join(PKG_ROOT, "02_Rayleigh_Sommerfeld_Validation_OOP")
+NEW = os.path.dirname(HERE)                                  # this stage folder
+PKG_ROOT = os.path.dirname(NEW)
+
+
+def legacy_dir(name: str) -> str:
+    """The pre-refactor stage folder: a sibling of this stage, or inside a
+    sibling package folder (the frozen mdl_design_package next to the OOP
+    package), or given by MDL_LEGACY_ROOT."""
+    cands = [os.path.join(PKG_ROOT, name),
+             os.path.join(os.path.dirname(PKG_ROOT), "mdl_design_package", name)]
+    env = os.environ.get("MDL_LEGACY_ROOT")
+    if env:
+        cands.insert(0, os.path.join(env, name))
+    for c in cands:
+        if os.path.isdir(c):
+            return c
+    raise SystemExit("legacy folder %r not found (tried %s); set MDL_LEGACY_ROOT to the "
+                     "frozen package root" % (name, cands))
+
+
+LEGACY = legacy_dir("02_validation_rs")
 LEGACY_JSON_KEYS = ["run_dir", "m_file", "lam_um", "F_um", "rs_ring_quadrature",
                     "fom_ring_quadrature", "z_peak_um", "z_peak_tile_window_um",
                     "I_tilewin_over_global", "fwhm_um", "eff_3fwhm", "strehl_like",

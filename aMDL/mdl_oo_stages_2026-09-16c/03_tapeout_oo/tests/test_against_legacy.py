@@ -20,9 +20,28 @@ import gdstk
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PKG_ROOT = os.path.dirname(os.path.dirname(HERE))
-LEGACY = os.path.join(PKG_ROOT, "03_tapeout", "export_gds.py")
-NEW = os.path.join(PKG_ROOT, "03_tapeout_oo", "export_gds.py")
+STAGE = os.path.dirname(HERE)
+PKG_ROOT = os.path.dirname(STAGE)
+
+
+def legacy_dir(name: str) -> str:
+    """The pre-refactor stage folder: a sibling of this stage, or inside a
+    sibling package folder (the frozen mdl_design_package next to the OOP
+    package), or given by MDL_LEGACY_ROOT."""
+    cands = [os.path.join(PKG_ROOT, name),
+             os.path.join(os.path.dirname(PKG_ROOT), "mdl_design_package", name)]
+    env = os.environ.get("MDL_LEGACY_ROOT")
+    if env:
+        cands.insert(0, os.path.join(env, name))
+    for c in cands:
+        if os.path.isdir(c):
+            return c
+    raise SystemExit("legacy folder %r not found (tried %s); set MDL_LEGACY_ROOT to the "
+                     "frozen package root" % (name, cands))
+
+
+LEGACY = os.path.join(legacy_dir("03_tapeout"), "export_gds.py")
+NEW = os.path.join(STAGE, "export_gds.py")
 
 
 def polygons(path: str) -> List[Tuple[int, np.ndarray]]:
