@@ -1,3 +1,43 @@
-runs/
+# --- Python -----------------------------------------------------------------
 __pycache__/
-*.pyc
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+.venv/
+venv/
+
+# --- editors / OS -------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- C++ / DLL builds (us_mdl_rings*.cpp, future UDO / diffraction DLLs) ------
+*.obj
+*.o
+*.lib
+*.exp
+*.pdb
+*.ilk
+build/
+
+# --- OpticStudio side files ---------------------------------------------------
+*.ZRD
+*.zrd
+*.CFG
+*.SES
+*.ZDA
+us_mdl_rings_log.txt
+
+# --- run folders: never versioned (every package under aMDL) -------------------
+# Each run is reproducible from the committed code + config: the log of a
+# run prints the config, run_MDL_design.py is deterministic (rng_seed), and
+# 20260916_071220 reproduced 20260915_231624 to the last digit. Freeze a
+# specific run on purpose with:  git add -f aMDL/<package>/runs/<run>/config.json ...
+runs/
+*.gds
+
+# --- superseded staging folder (16c is the working OOP package) ---------------
+aMDL/mdl_oo_stages_2026-09-16b/
