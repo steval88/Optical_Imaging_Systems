@@ -48,8 +48,10 @@ Module map
                   NscTrace (ray trace + detector readout)
     base.py       NscAnalysis: run folder, output subfolder
                   <run>/nsc/<stamp>_<mode>, run_info.json, ZOS session
-    probe.py, nulltest.py, ladder.py   one class per mode
+    probe.py, nulltest.py, diag.py, ladder.py, corr.py   one class per mode
+    direct.py     the diffraction DLL called through ctypes, no OpticStudio
+                  (CLI: dll_direct.py)
 """
-SCRIPT_VERSION = "2026-09-16.04"
+SCRIPT_VERSION = "2026-09-18.06"
 
 __all__ = ["SCRIPT_VERSION"]

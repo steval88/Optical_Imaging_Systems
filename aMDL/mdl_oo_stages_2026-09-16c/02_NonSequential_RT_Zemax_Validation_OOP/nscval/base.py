@@ -71,6 +71,11 @@ class RunContext:
         return p if os.path.exists(p) else None
 
 
+#: where standalone (no run folder) modes write: <package root>/runs
+STANDALONE_RUNS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "runs")
+
+
 class NscAnalysis:
     """Base of the modes: session, output folder, run_info.json."""
     MODE = "?"
@@ -84,8 +89,11 @@ class NscAnalysis:
         self.overrides: Dict[str, Any] = overrides or {}
         self.log = Log()
         self.stamp = time.strftime("%Y%m%d_%H%M%S")
+        # run-attached modes write into <run>/nsc/; standalone modes (probe,
+        # null, diag) into the package's runs/ folder, next to the design
+        # runs and equally git-ignored: <package>/runs/_standalone_nsc/
         base = (os.path.join(ctx.run_dir, "nsc") if ctx.run_dir else
-                os.path.join(os.path.expanduser("~"), "Documents", "Zemax_MDL_NSC"))
+                os.path.join(STANDALONE_RUNS_DIR, "_standalone_nsc"))
         self.out_dir = os.path.abspath(os.path.join(base, "%s_%s" % (self.stamp, self.MODE)))
         self.t0 = time.time()
         self.store: Dict[str, Any] = {}
@@ -127,6 +135,9 @@ class NscAnalysis:
         self.connect()
         try:
             self.run()
+        except KeyboardInterrupt:
+            log("interrupted by Ctrl+C: the running trace was cancelled; partial results are in "
+                "the log and run_info.json; the headless OpticStudio is closed below")
         finally:
             self.write_run_info()
             log("run_info.json written (%.1fs)" % (time.time() - self.t0))

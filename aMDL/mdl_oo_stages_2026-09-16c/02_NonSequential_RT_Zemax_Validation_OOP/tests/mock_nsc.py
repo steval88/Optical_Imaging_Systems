@@ -1,8 +1,12 @@
 """A stand-in for the ZOS-API non-sequential surface, enough to run the
 three modes end to end without OpticStudio. The 'ray trace' returns
-the SCALAR efficiency of the configured DLL (blaze sinc^2 or staircase
-formula, nscval.tea) for the traced order range, so the null test
-passes and the ladder reads ratio 1.000 -- a plumbing test, not physics.
+the SCALAR efficiency of the configured DLL for the traced order range
+-- for srg_blaze the N-level staircase ("# Layer") times the Fresnel
+transmission, with the srg order label MIRRORED (label m = physical
+order -m, as measured on 2026-09-18); for srg_step the N-level staircase
+whose "Depth" is the span of the levels (riser = Depth / (N - 1)), label
+= physical order, times Fresnel -- so the null test passes and the
+ladder reads ratio 1.000: a plumbing test, not physics.
 Member names are the ones nscval/nsc.py tries FIRST; the probe on the
 real build says whether they are right."""
 from __future__ import annotations
@@ -10,6 +14,8 @@ from __future__ import annotations
 import os
 import sys
 from types import SimpleNamespace
+
+import numpy as np
 from typing import Any, Dict, List
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -19,9 +25,10 @@ from nscval.dlls import LABELS, resolve                 # noqa: E402
 
 
 class Cell:
-    def __init__(self) -> None:
+    def __init__(self, header: str = "") -> None:
         self.DoubleValue = 0.0
         self.IntegerValue = 0
+        self.Header = header
 
 
 class DiffractionData:
@@ -39,7 +46,7 @@ class DiffractionData:
 
     def GetTransmitParamaterName(self, i: int) -> str:   # sic: the API's spelling
         labs = LABELS.get(self.DLL, [])
-        return labs[i - 1] if 0 < i <= len(labs) else ""
+        return labs[i] if 0 <= i < len(labs) else ""
 
     def SetTransmitParameterValue(self, i: int, v: float) -> None:
         self.t[i] = v
@@ -114,20 +121,28 @@ class Wavelengths:
 
 
 class Tool:
-    def __init__(self) -> None:
+    def __init__(self, system: "System") -> None:
+        self.system = system
         self.SplitNSCRays = self.ScatterNSCRays = self.UsePolarization = False
         self.IgnoreErrors = self.SaveRays = False
+        self.SaveRaysFile = ""
+        self.Succeeded = True
+        self.ErrorMessage = ""
 
     def ClearDetectors(self, n: int) -> None: ...
     def RunAndWaitForCompletion(self) -> None: ...
     def Close(self) -> None: ...
+
+    def GetTotalRayEnergy(self) -> float:
+        src = next(o for o in self.system.NCE.objs if o.TypeName == "SourceEllipse")
+        return src.GetObjectCell("Par3").DoubleValue
 
 
 class System:
     def __init__(self) -> None:
         self.NCE = NCE(self)
         self.SystemData = SimpleNamespace(Wavelengths=Wavelengths())
-        self.Tools = SimpleNamespace(OpenNSCRayTrace=lambda: Tool())
+        self.Tools = SimpleNamespace(OpenNSCRayTrace=lambda: Tool(self))
         self.saved: List[str] = []
 
     def New(self, b: bool) -> None: ...
@@ -142,22 +157,36 @@ class System:
         src = next(o for o in self.NCE.objs if o.TypeName == "SourceEllipse")
         power = src.GetObjectCell("Par3").DoubleValue
         d = grating.DiffractionData
+        if int(d.Split) == 0:                       # DontSplitByOrder: geometric, all power
+            return float(power)
         lam = self.SystemData.Wavelengths.GetWavelength(1).Wavelength
         m = resolve(LABELS[d.DLL], d.DLL)
-        P = 1.0 / grating.GetObjectCell("Par10").DoubleValue      # the object's Lines/um
+        P = d.t[m["period_um"]]                                     # the DLL's own period (index 0)
         n = d.t[m["index_grate_r"]]
         n_env = d.t[m["index_env_r"]]
         orders = list(range(d.StartOrder, d.StopOrder + 1))
         if "alpha_deg" in m and "depth_um" not in m:           # blaze
             import math
-            depth = P * math.tan(math.radians(d.t[m["alpha_deg"]]))
+            # srg convention: angles from the vertical, depth = fill P / (tan a + tan b)
+            fill = d.t.get(m["fill"], 1.0) if "fill" in m else 1.0
+            den = (math.tan(math.radians(d.t[m["alpha_deg"]]))
+                   + math.tan(math.radians(d.t.get(m["beta_deg"], 0.0) if "beta_deg" in m else 0.0)))
+            depth = fill * P / den if den > 0 else 0.0
             p = tea.waves_of_depth(depth, lam, n, n_env)
-            eta = tea.blaze_orders(orders, p)
+            n_layer = int(round(d.t.get(m["n_layer"], 1.0))) if "n_layer" in m else 1
+            t_fres = 4.0 * n * n_env / (n + n_env) ** 2
+            # the srg label m is the physical order -m; 1 layer = a slab (order 0 only)
+            phys = [-o for o in orders]
+            eta = t_fres * (tea.staircase_orders(n_layer, p, phys) if n_layer > 1
+                            else np.array([1.0 if o == 0 else 0.0 for o in phys]))
         else:                                                   # staircase
             depth = d.t[m["depth_um"]]
             N = int(round(d.t[m["n_steps"]]))
-            p = tea.waves_of_depth(depth, lam, n, n_env)
-            eta = tea.staircase_orders(N, p, [abs(o) for o in orders])
+            # srg_step (measured 2026-09-18): "Depth" is the SPAN of the N levels
+            # (riser = Depth / (N - 1)) and the label is the physical order
+            p = tea.waves_of_depth(depth * N / max(1, N - 1), lam, n, n_env)
+            t_fres = 4.0 * n * n_env / (n + n_env) ** 2
+            eta = t_fres * tea.staircase_orders(N, p, list(orders))
         return float(power * eta.sum())
 
 

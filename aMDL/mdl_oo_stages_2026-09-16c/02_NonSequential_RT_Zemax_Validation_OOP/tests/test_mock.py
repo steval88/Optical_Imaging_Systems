@@ -37,8 +37,9 @@ from nscval.probe import Probe                        # noqa: E402
 def main(run_dir: str) -> bool:
     ok = True
     with tempfile.TemporaryDirectory(prefix="nsc_mock_", ignore_cleanup_errors=True) as tmp:
-        os.environ["HOME"] = tmp                          # standalone outputs
+        os.environ["HOME"] = tmp                          # anything keyed on the home folder
         os.environ["USERPROFILE"] = tmp
+        base.STANDALONE_RUNS_DIR = os.path.join(tmp, "runs")   # standalone outputs -> temp
         ctx0 = RunContext(None)
         Probe(ctx0).main()
         nt = NullTest(ctx0, overrides={"analysis_rays": 1000})
@@ -55,7 +56,7 @@ def main(run_dir: str) -> bool:
             if os.path.exists(src):
                 shutil.copy2(src, run_copy)
         ctx = RunContext(run_copy)
-        ld = TeaLadder(ctx, overrides={"cases": [(90.0, 1.0), (60.0, 0.5)],
+        ld = TeaLadder(ctx, overrides={"treads": [3, 6], "slopes": [1.0, 0.5],
                                        "lams_um": [0.4, 0.75, 1.1]})
         ld.main()
         # np.load on an .npz keeps the file open until closed: on Windows an

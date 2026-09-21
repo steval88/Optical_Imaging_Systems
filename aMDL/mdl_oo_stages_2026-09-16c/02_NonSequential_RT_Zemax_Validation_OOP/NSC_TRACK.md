@@ -83,10 +83,11 @@ phase-only screen sends none to the focus) — hence the split of roles.
     python 02_NonSequential_RT_Zemax_Validation_OOP\mdl_nsc_validation.py probe
     python 02_NonSequential_RT_Zemax_Validation_OOP\mdl_nsc_validation.py null   [--gui]
     python 02_NonSequential_RT_Zemax_Validation_OOP\mdl_nsc_validation.py ladder runs\<run> [--gui]
+    python 02_NonSequential_RT_Zemax_Validation_OOP\mdl_nsc_validation.py corr   runs\<run> [--ladder <folder>]
     python 02_NonSequential_RT_Zemax_Validation_OOP\tests\test_mock.py runs\<run>    (offline plumbing)
 
 Outputs: `<run>\nsc\<YYYYMMDD_HHMMSS>_<mode>\` (probe / null without a run
-folder: `{Documents}\Zemax_MDL_NSC\`), each with `run_info.json`
+folder: `<package>\runs\_standalone_nsc\`, git-ignored like every run), each with `run_info.json`
 (version, command, every setting, the ZOS-API member names that were
 resolved), npz/json tables, figures and the `.zos`.
 
@@ -159,3 +160,423 @@ package supplies the connection and the log).
   Par 10 next to the slots and refuses `period_um` as a slot key. The
   step-DLL labels on file are PROVISIONAL until the next probe lists
   them (the probe now prints the labels of every srg_*.dll).
+* Fourth probe (nscval .04): verbatim labels of all srg DLLs on file
+  (`dlls.py`): step (22: Max Order, Depth, Number of Steps, Layers per
+  step, Alpha, coat top/side, Unused, Use Coating File, indices, Rotate,
+  Interpolation, Test Mode, "Only theseorders", Stochastic, NIL Thick),
+  step3 (slot 4 = Number of Layers), step2 (32 slots: A/B/C of four
+  sub-steps, four grating indices), trapezoid / trapezoid2, wire-grid,
+  user_defined (9: Max Order, File number, ...).
+* FIRST REAL NULL TEST (nscval .04): every order read 0.0000 at both
+  wavelengths, 19 s for 14 traces. The tab and slots were right (echo
+  matches the labels). Prime suspect: the Diffraction Grating object is a
+  LENS-type volume (two faces + edge) and was built with THICKNESS 0 —
+  a degenerate slab whose rays are lost silently under IgnoreErrors.
+  nscval .05: thickness 1 mm (setting `grating_thickness_mm`, echoed),
+  column headers of the object logged (`cell.Header`), the trace tool's
+  Succeeded / ErrorMessage / GetTotalRayEnergy logged, detector total
+  cross-checked pixel-0 vs per-pixel sum, and a GEOMETRIC PRE-CHECK
+  (Split = DontSplitByOrder, object order 1, no DLL) that must put
+  ~1.0 of the power on the detector before any DLL trace; it stops the
+  run with the diagnosis otherwise.
+* Null test with nscval .05 (thickness 1 mm): geometric pre-check
+  1.0000 (pixel-0 and per-pixel sum agree, trace succeeded, 1.0 W
+  launched, columns confirmed: 5 Thickness, 10 Lines/µm, 11 Diff Order)
+  — every Split-by-DLL order still 0.0000. The zero is made by the DLL
+  split itself. nscval .06 adds mode `diag`: one wavelength, order +1,
+  single-change variants (IgnoreErrors off → error text; # Layer 20;
+  all orders at once; polarization off as control; N-BK7 object;
+  Zemax's Diff2DSample.dll; srg Test Mode = 1 with a scan for files the
+  DLL writes) → diag.json + log. Result pending.
+* diag v1 (nscval .06) on the real build: baseline 0, errors_on 0 with
+  error text '' (no error is raised), layers_20 0, all_orders 0,
+  glass_object 0, test_mode 0 (no file written), Diff2DSample 0 (but
+  its T(m,0) defaults are 0 — inconclusive), and no_polarization 1.0000:
+  with polarization off OpticStudio cannot split, follows the object's
+  Diffract Order geometrically and everything arrives. So the SPLIT
+  MECHANISM itself loses the power, silently, whatever the DLL. diag v2
+  (nscval .07): NonSequentialData dump (ray-intensity cut-offs, simple
+  ray splitting), Diff2DSample with T(1,0) = 1 and its period, near
+  (z = 1.5 mm) and back (z = -5 mm) detectors, and the baseline trace's
+  ray database (ZRD) read back segment by segment (object, face, status,
+  intensity).
+* diag v2 (nscval .08): NonSequentialData defaults (min relative 0.001,
+  absolute 0, simple splitting off, 500 segments); Diff2DSample with
+  T(1,0) = 1 -> 0; near detector 0, back detector 1.0000 = the incident
+  beam only (transparent detector), i.e. no reflected orders either: with
+  the split on, every ray ENDS at the grating, no error, whatever the
+  DLL. ZRD written (8 kB) but the reader was called on IZRDReader
+  instead of GetResults() -> fixed in .09; .09 also loads OpticStudio's
+  own diffraction sample files, prints their grating object (type,
+  material, params, Diffraction tab, coatings) and traces them with
+  split + polarization through the same path.
+* diag v2 on the real build (.09): ZRD of the baseline: ray 1 has TWO
+  segments (launch, hit on the grating) — no children are created at
+  the split, no error. Zemax's own `Colorimetry\Example 3 Grating Splits
+  up Color.zos` (Diffraction Grating, SplitByTable -1..+1, 0.33 each,
+  coatings None) also reads 0 on its detector through our trace path
+  (split + polarization), while a sample without a grating traces
+  normally (0.7066). So the split itself produces nothing through the
+  API in this build, for Zemax's file too. Next (diag v3, .10): segment
+  status flags (reader fixed for the enum out-parameter), source
+  polarization data set explicitly, SplitByTable on our grating, all
+  samples (Diffractives first); GUI cross-check of Example 3 requested.
+* diag v3 (.11) — THE CAUSE. Split by TABLE on our grating delivers
+  power (0.5000: values written at "slots" 1 and 2 landed on order +1
+  and out of range), Zemax's table-split samples deliver power through
+  our trace (fringes 0.9998, multiple orders 0.95 + 0.05, Boolean
+  0.46 + 0.54); ZRD: 2 segments, status Terminated at the grating;
+  source polarization explicit -> still 0; ABSORB detector -> 0. So the
+  split works and only the DLL path gives 0: THE DIFFRACTION-TAB
+  PARAMETERS ARE INDEXED FROM 0. The 1-based listing showed 22 labels +
+  a blank (index 23 does not exist) and never showed index 0, which for
+  the srg DLLs is the PERIOD (2026-09-02 transcription was right; the
+  "shift" of 2026-09-16 morning was the wrong correction) and for
+  Diff2DSample "X Period". Period 0 -> RCWA with no grating -> zero
+  efficiency in every order -> children below the cut-off, no error.
+  nscval .12: 0-based everywhere (names(), slots, echo "param [i]"),
+  period_um back as a DLL key at index 0 AND on the object (Lines/um);
+  the probe writes/reads param [0]. Next: probe (index-0 label), null.
+* probe .12 / diag .13: index 0 IS `+Period/-Freq (um)`; with it set
+  (50) the srg_blaze variants STILL read 0.0000 in every order (beta 89,
+  alpha 30/beta 60, layers 20, max order 5, interpolation 1, stochastic
+  1, fill 0.5, N-BK7 object, explicit source polarization, ABSORB
+  detector, test mode writes nothing under Documents\Zemax); every
+  trace costs ~7 us/ray (an RCWA that runs costs ms/ray: the DLL
+  returns at once). Diff2DSample with its two periods and T(1,0) = 1
+  delivers 0.5000 (T and R both written -> very likely T/(T+R)),
+  SplitByTable 1.0000. So the whole Split-by-DLL path is alive through
+  the API and the zero is specific to the srg RCWA DLLs. The one thing
+  every srg run so far had in common: an object in AIR (or N-BK7) while
+  the DLL believed Index Grate 1.632 — a DLL that checks the ray's
+  medium against its own indices, or that only handles the ray coming
+  from INSIDE the grating material, would return zero. diag .14 adds:
+  glass_matched (N-BK7 + Index Grate = n_BK7), flipped_glass /
+  flipped_swap / air_flipped (grating face on the exit side), period_5um
+  (P/lam 8: fully resolved by 20 harmonics), coat_index_1, max_order_50,
+  freq_neg (negative index 0 = lines/um), sample_dll_Tonly (R = 0 ->
+  1.0 confirms the normalisation), us/ray per variant, Test Mode watch
+  on ProgramData\Zemax, cwd and the application folders; the baseline
+  now echoes the grating object (Lines/um, Diff Order, DLL values).
+  Decisive in parallel: the GUI trace of diag_baseline.zos (Ray Trace,
+  Split + Polarization, Detector Viewer): GUI 0 = physics/parameters,
+  GUI > 0 = API-hosted-process issue with the RCWA DLLs.
+* Diff2DSample.cpp (Documents\Zemax\DLL\Diffractive, read 2026-09-16
+  evening) settles two points. (i) Parameter storage: data[200] = max
+  parameters, data[201] = parameter 1 REFLECT, data[202] = parameter 1
+  TRANSMIT, ... -- one value pair per parameter, the API's index i is
+  the DLL's parameter i+1, and OpticStudio asks the DLL for each name
+  TWICE (reflect / transmit); a DLL may rewrite the values it is handed
+  in that call (Diff2DSample forces R = T on its first three). (ii) The
+  0.5 of sample_dll_T1 is exactly the DLL's own normalisation: it sums
+  T and R over all orders and divides when the sum exceeds 1, so
+  T(1,0) = R(1,0) = 1 -> 0.5. The DLL path through the API is therefore
+  fully alive (sample_dll_Tonly of .14 should read 1.0000). (iii) The
+  DLL is handed the approach-side index data[12] and the exit-side
+  index data[13] from the OBJECT and its surroundings, independent of
+  its own parameters -- which is what the glass_matched / flipped
+  variants of .14 probe for the srg DLLs.
+* GUI cross-check of diag_baseline.zos (2026-09-16 19:00) — THE ERROR.
+  Ray Trace with Split + Polarization, Ignore Errors ON: run time 0.09 s,
+  lost energy (thresholds) 0, lost energy (ERRORS) 2.0 = every ray (T and
+  R child each counted). Ignore Errors OFF: "Error 10561: NSC group
+  surface 1: Geometry error object 2 detected. Start xyz = 0, 0, -10;
+  Start lmn = 0, 0, 1" on the first ray, then the trace halts on the
+  dialog (0.00 % done, clock running — not a loop; Terminate -> 5e-5 W
+  lost = one ray). So the srg DLL raises a ray error on every call; the
+  API's IgnoreErrors=False never surfaced it. Ansys article
+  42661666095891 ("Simulating diffraction efficiency of surface-relief
+  grating using the RCWA method") lists when the srg DLLs "cannot
+  calculate and return geometric error": (L + m lam/P)^2 + M^2 equal to
+  1, n_env^2 or n_grate^2 for some order m (an order exactly at cut-off),
+  grazing incidence > 89 deg, non-physical parameters, RAM. Ours:
+  1.632 * 50 / 0.6 = 136.000 EXACTLY -> order 136 at cut-off inside the
+  grating medium. Remedy per the article: nudge the period. Also from
+  the article: the grating is always on Face 1 of the object; Index
+  Grate (R) = 0 means "use the substrate index", Index Env (R) = 0 the
+  outside material; "Error Log"/Test Mode non-zero writes
+  {Zemax}\DLL\Diffractive\<dll name>.txt; Max Order is the ORDER limit
+  (10 before 2023 R2.2, 50 after), the harmonic count follows P/lam
+  (P = 50 um at 0.6 um: ~136 propagating harmonics inside -> ms per ray
+  without Interpolation; the ladder's 90-180 um periods need
+  Interpolation or shorter periods). nscval .15: settings.cutoff_orders
+  / check_cutoff (null test stops with the message, ladder skips the
+  case and says so), NULL period 50.0 -> 50.5 um, diag keeps 50.0 to
+  reproduce and adds period_50p5 and lam_075. Open: the null test's
+  0.75 um line (m = 108.8, no coincidence) also read 0 — lam_075 will
+  say whether a second cause exists.
+* diag .15 / null .15 (2026-09-16 20:31): EVERY srg variant still 0 —
+  including period 50.5 um, lam 0.75 um and period 5 um, all off the
+  cut-off coincidence — so the coincidence was at most one cause. The
+  us/ray column is useless (51 us for every variant, table and
+  Diff2DSample included: tool overhead). sample_dll_Tonly = 1.0000
+  confirms the T/(T+R) reading. The ZRD shows the ray terminated on
+  object 2 FACE 1 (the article: "the grating is always on Face 1").
+  THE SECOND CAUSE, from the article's own definition: "Alpha and Beta
+  are positive in direction rotating from -z to +x" — the wall angles
+  are measured FROM THE VERTICAL, and for the blaze "the depth is
+  automatically calculated inside depending on the given parameters
+  Alpha and Beta", i.e. depth = fill P / (tan a + tan b). Our recipe
+  (2026-09-02) put alpha = atan(depth / P) = 1.08 deg (from the
+  SURFACE) and beta = 90: in the DLL's convention a nearly vertical
+  wall plus a wall lying flat, depth 0 — non-physical, and "one of the
+  most common reasons for geometric errors are a non-physical grating
+  parameter". Right-angle sawtooth in srg terms: beta = 0 (vertical
+  back wall), alpha = atan(fill P / depth) = 88.92 deg. nscval .16:
+  blaze_alpha_deg() returns the srg alpha, NULL beta 0, the log echoes
+  the depth the DLL will rebuild; diag baseline = NULL_SETTINGS (50.5,
+  88.9/0) with variants old_convention (1.08/90, expected 0), beta_1,
+  alpha_neg (mirrored sawtooth), sym_30, period_50_exact (P = 50.0,
+  expected 0 if the cut-off condition is real), lam_075. The mock
+  follows the same convention (depth from alpha/beta/fill).
+* diag .16 (2026-09-16 20:48, partial, still running after 2 h): THE
+  RCWA RUNS. With alpha 88.9 / beta 0 the baseline costs 17.6 ms per
+  ray (20 layers: 197 ms; Max Order 5: 0.38 ms -> the cost scales as
+  (2N+1)^3, so "Max Order" IS the RCWA truncation, not only an order
+  limit), old_convention / alpha_neg / sym_30 / interp_1 stay at 51 us
+  (refused). stochastic_1 puts 0.925 of the power on the detector and
+  fill_05 0.18 at +1 -- yet the deterministic split to +1 (baseline,
+  layers_20, beta_1, coat_index_1) still reads 0.0000. So the
+  efficiencies are computed and mostly land within the detector when
+  the DLL picks the order itself; the question is now WHICH order the
+  DLL labels +1 (sign) and whether 20 harmonics at P/lam = 84 (n P/lam
+  = 137 propagating orders inside) are anywhere near converged -- they
+  are not. nscval .17: diag rewritten around that question (2000 rays,
+  ~35 s per trace): +1 / -1 / 0 / all orders on one system, the ZRD of
+  the all-orders trace read back into power-per-order (m from the
+  child's direction cosine: nsc.zrd_raw / order_histogram), Max Order
+  30 and 5, controls, P = 5 um (n P/lam = 13.6 < 20: converged) with
+  +1 / -1 / ZRD, lam 0.75, P = 50.0 exact, N-BK7 matched. The null test
+  is retuned to a period the RCWA can converge at within the cap:
+  P 8.0 um (n P/lam 21.8 / 17.4), Max Order 30, 3000 rays, detector
+  40 mm / +-12.5 mm, tol 0.08 (TEA itself ~5 % at P/lam 13).
+  CONSEQUENCE FOR THE LADDER: its cases at 45-180 um need n P/lam up to
+  ~500 harmonics; the cap is 50. The RCWA can only validate TEA at
+  P/lam <~ 20 (P <~ 12 um at 0.6 um), which is where TEA is doubtful
+  anyway; the ladder must be redesigned on short periods (next).
+* 2026-09-17: dll_direct.py / nscval.direct -- the DLL called through
+  ctypes with a hand-built data[] (layout from the help table "Data[]
+  values for Bulk Scatter, Diffraction, Surface Scatter DLLs" and
+  diff_samp_1.c: [10] lam, [11] transmit/reflect, [12]/[13] indices,
+  [14] order, [15]/[16] start/stop, [20..25] E field, [30] energy OUT,
+  [31] flag, [33]/[34] phase derivatives, [51+i] parameter i+1 and the
+  [201+2i]/[202+2i] reflect/transmit pairs -- both blocks are filled).
+  No OpticStudio in the loop: rc -1 is visible, efficiencies are exact,
+  a call costs what the RCWA costs. Self-test on Diff2DSample.dll;
+  then the srg blaze per order (transmit / reflect, TE / TM) with sinc^2
+  beside, glass exit index, the old angle pair and P = 50.0 (both
+  expected rc -1), and the Max Order sweep 5..50 (convergence, ms).
+  dP/dx at m = +1 is the DLL's sign convention. Verified on Linux
+  against a fake srg DLL with the same interface.
+* diag .17 (2026-09-17 17:40, P 8 um, Max Order 30, # Layer 1): +1 = 0,
+  -1 = 0, ORDER 0 = 0.860, all orders 0.873; 50-70 ms per ray. So the
+  RCWA runs and puts everything into the zeroth order: "# Layer" = 1
+  staircases the sawtooth into ONE slab, i.e. a flat plate (0.87 = one
+  minus two Fresnel reflections at n 1.632). The blaze needs the
+  profile sliced into several layers; the cost is linear in the count
+  (.16: 197 ms at 20 layers vs 17.6 at 1). The ZRD histogram of .17
+  read garbage because zrd_raw kept the leading success flag that
+  read_zrd strips (sr[1:]) -- fixed. nscval .19 (patch 2026-09-17.03):
+  diag = layer sweep 1/5/10/20 at +1, then -1 / 0 / all / ZRD at the
+  settings' count, Interpolation 1 (cost), lam 0.75, P 5 um at Max
+  Order 20; 400 rays per trace. NULL_SETTINGS: n_layer 10, 1000 rays.
+* diag .18 (2026-09-17 18:16, P 8, Max Order 30): with 5 / 10 / 20
+  layers at alpha 83.2 / beta 0 the orders +1, -1 AND 0 all read ~0
+  (20 layers: 0.0017 at +1); at 1 layer order 0 held 0.86. So with
+  layers the structure diffracts -- but not into the orders of a
+  one-wave sawtooth. The depth the DLL builds from (Alpha, Beta) is not
+  0.95 um: if the angles are measured from the SURFACE and beta = 0
+  means "no second facet", 83.2 deg gives depth = P tan(alpha) = 67 um
+  (a 70-wave sawtooth, power in orders far outside +-3 / evanescent),
+  which matches every observation, including the 1-layer slab. Cost:
+  0.11 / 0.34 / 0.51 / 1.03 s per ray at 1 / 5 / 10 / 20 layers (Max
+  Order 30, 61 harmonics). nscval 2026-09-17.03: diag = the four
+  candidate pairs (vertical 83.2/0; surface 6.77/0; 6.77/89; 6.77/90)
+  at orders +1 and 0 with 5 layers and 300 rays, then for the best:
+  order -1, EVERY propagating order -13..+13 from the ZRD (40 rays),
+  layers 1/10/20, Interpolation 1 cost. Note: the DLL computes the RCWA
+  once per requested ORDER per ray (all_orders of .17 cost 7x a single
+  order) -- Start/Stop ranges are expensive.
+* diag .19 (2026-09-17 18:53): the four Alpha/Beta pairs. C and D (beta
+  89 / 90) refused at 3.4 ms per ray -> the angles ARE from the vertical
+  (a wall at 90 is flat) and pair A (83.2 / 0) is the one-wave sawtooth.
+  A and B compute (320 ms) and deliver nothing at +1, -1, 0. The ZRD of
+  every propagating order (-13..+13, 40 rays): each ray = launch + hit
+  on face 1, status Terminated, FULL energy, not one child. So with
+  layers the DLL returns 0 (or NaN) for every order, while 1 layer gave
+  a slab and (fill 0.5, 1 layer) a binary grating. Interpolation 1
+  costs MORE (711 ms/ray), no cheap path. 20 layers: 1.1 s/ray.
+  nscval 2026-09-17.04: single-parameter probe of the staircase path at
+  5 layers, orders +1 and 0: Beta 1 / 5 (cot(beta) at 0), Index Coat 1
+  / n_grate (zero-index coat layer singular), fill 0.9 (zero-width top
+  layer), both, and Test Mode with the DLL's error log read back.
+* 2026-09-18, diag .20 (single-parameter probe) — THE DLL'S OWN LOG.
+  Test Mode = 1 writes DLL\Diffractive\srg_blaze_RCWA_log.txt, and for
+  every layered ray it says: "Error: Power conservation. (error =
+  -0.200816 %)  Reflect power = 0.0320468  Transmit power = 0.965945",
+  followed by the full input echo (period 0.008 mm, 61 harmonics,
+  approaching / exit index 1, incident LMN (0,0,1), the 23 parameters).
+  So the RCWA is right -- a 5-layer one-wave sawtooth transmits 96.6 %
+  -- but the DLL REJECTS the ray when its energy balance misses by more
+  than its tolerance (< 0.2 %). A single slab conserves exactly, hence
+  order 0 = 0.86 at 1 layer; every staircase carries the truncation
+  error of 61 harmonics at P/lam = 13 and is refused. Beta 1/5, Index
+  Coat, fill 0.9 change nothing (all ~0.0014 or 0). nscval
+  2026-09-18.01: convergence probe with Test Mode on and the DLL log
+  read after each trace (50 rays): Max Order 30/40/50 at P 8, 2/3
+  layers, polarization off, P 5 um at Max Order 20/30 and 5/10 layers.
+  The DLL log also echoes the parameter block it received -- the
+  definitive check of the 0-based slot mapping (period 8, Max Order 30,
+  fill 1, alpha 83.23, beta 0, # Layer 5, Index Grate 1.632, Env 1).
+* diag 2026-09-18.01 (log of 11:52) -- THE CONSERVATION CHECK IS CLEARED,
+  THE ORDER IS NOT +1. Max Order 40 and 50 at P 8 um (81 / 101
+  harmonics) and every P 5 um case run with NO "Power conservation"
+  error in the DLL log; only the 61-harmonic / 5-layer reference still
+  fails (-0.2008 %). Detector at +1 (50 rays): 2 layers 0.2997, 3
+  layers 0.0000, MO40 5 layers 0.0013, MO50 0.0015, P5 0.004-0.006.
+  The scalar staircase (tea.py) of a one-wave blaze: 2 levels 0.405 at
+  BOTH +1 and -1 (symmetric binary); 3 levels 0.684 at the blaze order
+  and 0 at its mirror; 5 levels 0.875 / 0. The measured pattern is the
+  mirror: the srg sawtooth diffracts into m = -1 as OpticStudio labels
+  the orders (its facet "descends toward +x"). Polarization off gives
+  1.0000 at 20 ms/ray (no DLL split applied -- not informative).
+  nscval 2026-09-18.02: single-order traces at -1 (L2, L3, MO40 L5, P5
+  L5, P5 L10) and +2 (L3, expect 0.17), then the ZRD histogram of
+  -3..+3 for L3, P5 L5 and MO40 L5 with a least-squares verdict against
+  the scalar staircase of both signs. If confirmed: LADDER_SETTINGS
+  order_sign = -1, null test compares eta(m) with sinc^2(-m - p).
+  Also fixed: the '\D' SyntaxWarning (raw docstring).
+* diag 2026-09-18.02 (log of 12:25, 17 min) -- FOUND. Requesting the
+  label -1 delivers the blaze power: 2 layers 0.361, 3 layers 0.587,
+  MO40 5 layers 0.815, P5 MO30 5 layers 0.819, P5 10 layers 0.784;
+  the 3-layer label +2 reads 0.117 (scalar 0.171 x Fresnel = 0.161).
+  The full-order ZRD histograms (m from the child's direction cosine)
+  put that power at l = +lam/P, i.e. the PHYSICAL +1 of OpticStudio's
+  grating equation (least squares vs the staircase TEA: 0.003 for +1,
+  1.43 for -1): the srg DLL labels its orders mirrored, label m <->
+  sin(theta) = -m lam/P. Not a bug, a convention -- the ray directions
+  come from the DLL together with the efficiencies, so label and
+  direction are consistent, only the sign of the label differs from
+  the object's Diffract Order convention. Numbers vs scalar staircase x
+  Fresnel (0.942): 5 layers 0.99 (both P 8 / MO40 and P 5 / MO30), 3
+  layers 0.91, 2 layers 0.95, 10 layers at 61 harmonics 0.86 (not yet
+  converged). Every ray is identical: 40 and 50 rays agree to 4 digits.
+  nscval 2026-09-18.03: NULL_SETTINGS -> P 5 um, Max Order 30, 5
+  layers, order_sign -1 (label = -m), 20 rays, detector z 30 / half 20;
+  the null test traces the PHYSICAL orders -3..+3 at 0.60 and 0.75 um
+  (labels mirrored) against the scalar N-level staircase x Fresnel
+  (tol 0.08), prints the sawtooth sinc^2 beside it; LADDER_SETTINGS
+  order_sign -1; the mock models the mirrored label and the staircase.
+  Expected: ~4 min, +1 at 0.60 um ~0.82 vs 0.824, at 0.75 um ~0.73 vs
+  0.726, order 0 at 0.75 um ~0.05.
+* 2026-09-18 14:39 -- NULL TEST PASSED (nscval 2026-09-18.03, 237 s).
+  P 5 um, Max Order 30, 5 layers, labels mirrored, 20 rays. 0.60 um
+  (p = 1.0): physical +1 = 0.8234 vs scalar staircase x Fresnel 0.8247
+  (diff -0.0013), every other order < 0.004, sum 0.839. 0.75 um
+  (p = 0.8): +1 = 0.6508 vs 0.7255 (-0.075, inside tol 0.08), order 0
+  0.0458 vs 0.0561, sidebands within 0.009, sum 0.763 vs 0.830. The
+  detuned line at P/lam = 6.7 (m = 3 at 27 deg) is where the rigorous
+  result drifts from the scalar one -- the pattern is right, the level
+  is 8 % lower: the TEA error the ladder is meant to map, not plumbing.
+  Geometric pre-check 1.0000. The NSC plumbing is closed: slot map,
+  angle convention, cut-off check, conservation check (harmonics),
+  layer count, order label sign, deterministic per-ray efficiency.
+  NEXT: the ladder cannot run at the fold periods (rim P = 119 um at
+  the SWIR 1-inch F/3 design: n P / lam_min = 173 harmonics, cap 50).
+  Redesign on short periods: keep the tread DELTA and the riser
+  h_s = DELTA sin(theta) / (n - 1) of the local blaze, reduce the
+  tread count N' to 4 / 6 / 8 (P' 13 / 20 / 26 um, harmonics 19 / 29
+  / 38 at 1.1 um), reference = TEA of the same N'-step staircase x
+  Fresnel, 5 rays (identical rays), window +/-3; the fold reset (H_f,
+  18 waves) stays a geometric estimate (edge zone ~ sqrt(lam H_f) ~ 6
+  um ~ 5 % per fold at the rim).
+* nscval 2026-09-18.04 -- THE LADDER REDESIGNED ON SHORT STAIRCASES.
+  The S3 design (D 10.24 mm, F 50.94 mm, NA 0.100, ring 2.0 um, fold
+  14.4 um, 0.4-1.1 um): rim fold period 89 um = 45 treads, n P/lam_min
+  = 360 harmonics -- out of reach (cap 50, cost ~ (2N+1)^3). The ladder
+  now keeps the LOCAL geometry, tread DELTA and riser h_s = DELTA
+  sin(theta)/(n-1) (0.326 um at the rim, 0.163 um at half radius), and
+  shortens the staircase to N' = 3 / 4 / 6 treads (P' 6 / 8 / 12 um):
+  same tread/lam and riser/lam physics, a period the RCWA converges on.
+  Per line: Max Order = ceil(1.5 n P'/lam) clipped to [20, 50] ('!'
+  where the margin is not met: N' 6 at 0.4-0.5 um), design order p0 =
+  round((n-1) d'/lam) (0..3), window +/-3, evanescent orders skipped,
+  reference = scalar N'-step staircase x Fresnel, 4 rays (identical
+  rays), order-label sign measured on the first case (labels +p0 / -p0),
+  the tread stretched by the smallest of 0.5..4 % that clears every
+  cut-off coincidence (2.0 um treads on a 50-nm comb hit 6/0.4 = 15
+  etc.), convergence pair Max Order / Max Order - 10, cost estimate
+  printed before tracing (S3, 8 lines: ~28 min). CLI: --treads --slopes
+  --na --riser --lam-stride. The fold reset (H_f) is not in the ladder.
+  Mock updated (mirrored label, Fresnel on srg_step too): ALL OK.
+* 2026-09-18 16:00 -- FIRST LADDER RUN on 20260916_071220_s3_comb_softmin_a1
+  (nscval .04, 24 min, 6 cases x 8 lines). Two things were wrong in the
+  harness and both are pinned by the data:
+  (1) srg_step "Depth (um)" is the SPAN of the staircase (lowest to
+      highest level), riser = Depth / (N - 1) -- not N x riser. Every
+      returned line fits the scalar N-level staircase only with
+      p x N/(N-1): 34 lines, ratio at the design order 0.86-1.04, e.g.
+      N4 at 1.1 um: orders 0 / +1 / -3 / +3 = 0.444 / 0.268 / 0.033 /
+      0.0065 measured vs 0.44 / 0.30 / 0.033 / 0.0067 scalar x Fresnel.
+      (The KB wording "Depth = total staircase height" meant exactly
+      that.) So the run measured risers 1.5x / 1.33x / 1.2x the intended
+      ones (0.49 / 0.43 / 0.39 um at the rim).
+  (2) the srg_step order label is the PHYSICAL order (+1) -- opposite
+      to srg_blaze (-1). The auto-sign had been measured on the 0.4 um
+      line, which the DLL refused, and defaulted to -1: the tables of
+      the run must be read with label = -printed m.
+  (3) 14 of 48 lines returned 0 at every order -- the DLL's
+      energy-balance refusal, non-monotonic in the harmonic count (N6:
+      Max Order 35 fine, 31 refused, 28 partial, 27 refused).
+  WHAT THE RUN SAYS ANYWAY (re-read with the right model): for 2.0 um
+  treads and risers 0.39-0.49 um the rigorous efficiency at the design
+  order is 0.86-0.95 of the scalar staircase x Fresnel over 0.5-1.1 um
+  (typically 0.92), window sums 0.90-0.98; no wavelength trend inside
+  the converged range. At half slope (0.20-0.24 um risers): 0.90-1.01.
+  nscval 2026-09-18.05: Depth = (N' - 1) h_s written to the DLL
+  (depth_convention "span"), order_sign +1 for srg_step, auto-sign only
+  on a line with power, the design order traced first and a refused
+  line retried at Max Order -3/+3/-6/+6/-9/+9 (first that returns power
+  kept, 'x' in the table if none), Test Mode on with the DLL log
+  (srg_step_RCWA_log.txt) summarized per line, shared DllLog reader in
+  nsc.py. Mock models the span convention: ALL OK.
+* 2026-09-18 17:08 -- THE LADDER RUNS (nscval .05, 19 min, 6 cases x 8
+  lines, 34 lines returned, 14 refused). S3 design, 2.0 um treads,
+  risers 0.326 um (rim, sin theta 0.100) and 0.163 um (half radius).
+  eta_RCWA / (scalar N'-level staircase x Fresnel) at the design order:
+    rim   N3: 0.94 0.93 0.96 0.92 1.03 1.01 0.98 (0.5..1.1 um)
+          N4: 1.09 0.87 0.90 0.87 0.97 0.99 0.94
+          N6: 0.91 0.90 0.99 0.95 (0.85..1.1 um)
+    half  N3: 0.90 1.04 0.93 0.98 0.95 0.98 0.99 1.01 (0.4..1.1 um)
+          N4: 1.01 0.93 0.95 0.99 0.98 0.97 0.95
+          N6: 0.92 0.91 0.93 0.93 (0.85..1.1 um)
+  window sums 0.90-1.08. Convergence pair at N3 / 0.4 um: Max Order 35
+  vs 25 differ by 0.0015. The refusals are the DLL's energy-balance
+  check with errors of 3-676 % at Max Order >= 41 with 4-6 layers (the
+  RCWA itself breaks down there, retries at 47/44/41 all refused): N6
+  is out of reach below 0.85 um, N4 at 0.4 um. Every refused line
+  logged "Error: Power conservation" (8 per attempt = 4 rays x TE/TM).
+  READING: for the S3 geometry the thin-element model overestimates the
+  local staircase efficiency by ~5-10 % at the rim and ~2-6 % at half
+  radius, with no wavelength trend inside 0.5-1.1 um; the N3 window
+  sums above 1 at 1.05-1.1 um say the graded interface reflects less
+  than the flat Fresnel factor assumes. nscval 2026-09-18.06: corr.py
+  folds the ladder into the design's efficiency_corr_npz contract
+  (lam_um, r_um, eta): design-order ratio where p >= 0.75 and eta_ref
+  (p0) >= 0.25, window-sum ratio otherwise, cases averaged per slope,
+  r = 0 -> 1.0, radius of a slope r = F s / sqrt(1 - s^2) (2550 and
+  5120 um); written by the ladder itself and by the new `corr` mode on
+  an existing ladder folder (no OpticStudio). From this run:
+    lam    r=0   2550   5120 um
+    0.40   1.00  0.904  0.916
+    0.50   1.00  1.032  1.015
+    0.60   1.00  0.994  0.904
+    0.70   1.00  0.959  0.925
+    0.85   1.00  0.969  0.919
+    0.95   1.00  0.975  0.975
+    1.05   1.00  0.961  1.019
+    1.10   1.00  0.973  1.017
+  Next: re-run the design with efficiency_corr_npz pointing at it (a
+  few-percent, nearly achromatic discount: J will move little), and
+  the fold reset (rung 4, srg_user_defined with the real zone profile)
+  remains the open item.

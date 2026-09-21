@@ -64,18 +64,18 @@ class Probe(NscAnalysis):
                 names = tab.names()
                 log("DLL %s: %d parameter labels in slot order:" % (PROBE_SETTINGS["dll"],
                                                                     len(names)))
-                for i, n in enumerate(names, 1):
-                    log("  slot %2d  %s" % (i, n))
+                for i, n in enumerate(names):
+                    log("  param [%2d]  %s" % (i, n))
                 # write / read back one slot each way (slot 1 = Max Order on the srg DLLs)
-                tab.set_slot(1, 12.0)
-                log("slot 1 written 12 -> read back (transmit, reflect) = %s" % (tab.get_slot(1),))
+                tab.set_slot(0, 50.0)
+                log("param [0] written 50 -> read back (transmit, reflect) = %s" % (tab.get_slot(0),))
                 # the labels of every other srg DLL, verbatim, for nscval/dlls.py
                 for other in avail:
                     if other.lower().startswith("srg_") and other != PROBE_SETTINGS["dll"]:
                         tab.use_dll(other, 0, 0)
                         labs = tab.names()
                         log("labels of %s (%d): %s" % (other, len(labs),
-                                                        " | ".join("%d:%s" % (i + 1, x) for i, x in enumerate(labs))))
+                                                        " | ".join("[%d]%s" % (i, x) for i, x in enumerate(labs))))
             except SystemExit as exc:
                 log("DiffractionTab adapter stopped: %s" % exc)
         # editor cell storage types, for the record (integer vs double setters)

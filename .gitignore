@@ -41,3 +41,9 @@ runs/
 
 # --- superseded staging folder (16c is the working OOP package) ---------------
 aMDL/mdl_oo_stages_2026-09-16b/
+
+# --- patch drop folders: the zips are applied with Expand-Archive and their
+# content lives in the tracked source files; the archives themselves are not
+# versioned (their version stamps are recorded in NSC_TRACK.md / WORKFLOW.md)
+patch/
+*.zip
