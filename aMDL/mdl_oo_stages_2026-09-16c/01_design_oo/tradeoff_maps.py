@@ -25,7 +25,7 @@ sys.path.insert(0, HERE)
 
 from tradeoff import (PRESETS, Ceiling, Feasibility, LensSpec, StudyConfig,  # noqa: E402
                       __version__)
-from tradeoff.space import INCH_MM  # noqa: E402
+from tradeoff.space import INCH_MM, PAPER_THRESHOLD_CLASS, REFERENCE_ORDER, reference_spec  # noqa: E402
 from tradeoff.study import run_study  # noqa: E402
 
 
@@ -56,11 +56,24 @@ def main(argv=None) -> None:
     ap.add_argument("--band", default="400,1100", help="lam_min,lam_max [nm]")
     ap.add_argument("--h", type=float, default=15.0, help="relief height [um]")
     ap.add_argument("--dh", type=float, default=0.078)
-    ap.add_argument("--delta", type=float, default=2.0, help="ring width [um]")
+    ap.add_argument("--delta", type=float, default=None,
+                    help="ring width [um]; default: the Nyquist width lam_min/(2 NA)")
     ap.add_argument("--material", default="AZ4562")
     ap.add_argument("--name", default="spec")
-    ap.add_argument("--target", type=float, default=0.05, help="target continuous-band J")
+    ap.add_argument("--class", dest="klass", default=None, choices=list(REFERENCE_ORDER),
+                    help="optional: paper reference lens (Xiao et al., NA 0.1, 400-1100 nm) the "
+                         "spec must at least match")
+    ap.add_argument("--no-paper-threshold", action="store_true",
+                    help="do not apply the paper's default criterion (max J >= 0.2 on its scale) "
+                         "when neither --class nor --target is given")
+    ap.add_argument("--refs", action="store_true",
+                    help="show where the paper's lenses S1..S5 sit relative to this spec")
+    ap.add_argument("--target", type=float, default=None,
+                    help="optional requirement: mean focusing efficiency over the band in PERCENT "
+                         "(= continuous-band J by paper Eq. 5)")
     ap.add_argument("--frac", type=float, default=0.55, help="achievable fraction of the ceiling")
+    ap.add_argument("--class-tol", type=float, default=0.75,
+                    help="ceiling ratio to the reference that counts as reaching the class")
     ap.add_argument("--n-rho", type=int, default=256)
     ap.add_argument("--n-w", type=int, default=512)
     ap.add_argument("--preset", choices=sorted(PRESETS))
@@ -76,8 +89,15 @@ def main(argv=None) -> None:
         for line in s.describe():
             print("  " + line)
         c = Ceiling.compute(s, numeric=True, n_rho=args.n_rho, n_wavelengths=args.n_w)
+        paper = not args.no_paper_threshold and args.klass is None and args.target is None
+        ref_cls = args.klass or (PAPER_THRESHOLD_CLASS if paper else None)
+        cr = Ceiling.compute(reference_spec(ref_cls), numeric=True, n_rho=args.n_rho,
+                             n_wavelengths=args.n_w) if ref_cls else None
         print("FEASIBILITY")
-        for line in Feasibility(s, c, args.target, args.frac).lines():
+        for line in Feasibility(s, c, args.klass, cr, class_tolerance=args.class_tol,
+                                target_j=(args.target / 100.0 if args.target is not None else None),
+                                achievable_fraction=args.frac, show_references=args.refs,
+                                paper_threshold=paper).lines():
             print("  " + line)
         return
     if args.preset:

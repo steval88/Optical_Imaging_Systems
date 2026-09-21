@@ -29,7 +29,7 @@ Module map
 from .space import Ceiling, Feasibility, LensSpec, REFERENCE_POINTS
 from .study import PAPER_FIG1, PRESETS, SWIR_TRADEOFF, PairMapStudy, StudyConfig, SweepStudy, run_study
 
-__version__ = "2026-09-16.01"
+__version__ = "2026-09-16.05"
 
 __all__ = ["Ceiling", "Feasibility", "LensSpec", "REFERENCE_POINTS", "PAPER_FIG1", "PRESETS",
            "SWIR_TRADEOFF", "PairMapStudy", "StudyConfig", "SweepStudy", "run_study", "__version__"]

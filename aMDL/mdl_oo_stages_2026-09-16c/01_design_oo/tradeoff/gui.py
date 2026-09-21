@@ -21,7 +21,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
-from .space import INCH_MM, Ceiling, Feasibility, LensSpec, MATERIALS
+from .space import (INCH_MM, PAPER_THRESHOLD_CLASS, REFERENCE_ORDER, Ceiling, Feasibility, LensSpec,
+                    MATERIALS, reference_spec)
 from .study import PRESETS, StudyConfig, StudyFolder, PairMapStudy, SweepStudy, replace
 
 
@@ -84,7 +85,7 @@ class TradeoffApp:
         r += 1
         field(r, "height quantum dh", "dh", "0.078", "um")
         r += 1
-        field(r, "ring width DELTA", "delta", "2.0", "um")
+        field(r, "ring width DELTA", "delta", "auto", "um  (auto = Nyquist lam_min/2NA)")
         r += 1
         ttk.Label(left, text="material").grid(row=r, column=0, sticky="w")
         self.v["material"] = tk.StringVar(value="AZ4562")
@@ -93,17 +94,47 @@ class TradeoffApp:
         r += 1
         ttk.Separator(left).grid(row=r, column=0, columnspan=3, sticky="ew", pady=6)
         r += 1
-        ttk.Label(left, text="Targets", font=("", 10, "bold")).grid(row=r, column=0, columnspan=3, sticky="w")
+        ttk.Label(left, text="Requirement", font=("", 10, "bold")).grid(row=r, column=0, columnspan=3, sticky="w")
         r += 1
-        field(r, "target J (continuous band)", "target_j", "0.05")
+        self.v["req_mode"] = tk.StringVar(value="paper")
+        ttk.Radiobutton(left, text="paper's criterion (S2-6): max J >= 0.2 on Xiao's scale",
+                        variable=self.v["req_mode"], value="paper").grid(row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+        ttk.Radiobutton(left, text="mean focusing efficiency >=", variable=self.v["req_mode"],
+                        value="eff").grid(row=r, column=0, sticky="w")
+        self.v["target_j"] = tk.StringVar(value="3")
+        ttk.Entry(left, textvariable=self.v["target_j"], width=10).grid(row=r, column=1, sticky="w")
+        ttk.Label(left, text="%  (band average; = J by Eq. 5)").grid(row=r, column=2, sticky="w")
+        r += 1
+        ttk.Radiobutton(left, text="paper lens class >=", variable=self.v["req_mode"],
+                        value="class").grid(row=r, column=0, sticky="w")
+        self.v["target_class"] = tk.StringVar(value="S3")
+        ttk.Combobox(left, textvariable=self.v["target_class"], values=list(REFERENCE_ORDER),
+                     width=5, state="readonly").grid(row=r, column=1, sticky="w")
+        ttk.Label(left, text="S1..S5 = Xiao et al., NA 0.1, 400-1100 nm").grid(row=r, column=2, sticky="w")
+        r += 1
+        ttk.Radiobutton(left, text="none (informational only)", variable=self.v["req_mode"],
+                        value="none").grid(row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+        self.v["show_refs"] = tk.BooleanVar(value=False)
+        ttk.Checkbutton(left, text="show where the paper's lenses sit (S1..S5)",
+                        variable=self.v["show_refs"]).grid(row=r, column=0, columnspan=3, sticky="w")
         r += 1
         field(r, "achievable fraction of ceiling", "frac", "0.55")
+        r += 1
+        field(r, "class tolerance (ceiling ratio)", "class_tol", "0.75")
         r += 1
         ttk.Separator(left).grid(row=r, column=0, columnspan=3, sticky="ew", pady=6)
         r += 1
         ttk.Button(left, text="Check feasibility", command=self.on_check).grid(row=r, column=0, columnspan=3, sticky="ew")
         r += 1
         ttk.Button(left, text="Pair map (Fig. 1b/c)", command=self.on_pair).grid(row=r, column=0, columnspan=3, sticky="ew")
+        r += 1
+        self.v["pair_mode"] = tk.StringVar(value="numeric")
+        ttk.Radiobutton(left, text="numeric, Eq. S14", variable=self.v["pair_mode"],
+                        value="numeric").grid(row=r, column=0, sticky="w")
+        ttk.Radiobutton(left, text="semi-analytic, Eq. S16", variable=self.v["pair_mode"],
+                        value="analytic").grid(row=r, column=1, columnspan=2, sticky="w")
         r += 1
         ttk.Label(left, text="full study preset").grid(row=r, column=0, sticky="w")
         self.v["preset"] = tk.StringVar(value="around this spec")
@@ -141,9 +172,11 @@ class TradeoffApp:
     def spec(self) -> LensSpec:
         g = lambda k: float(self.v[k].get())  # noqa: E731
         d_mm = g("diameter") * (INCH_MM if self.v["d_unit"].get() == "inch" else 1.0)
+        delta_txt = self.v["delta"].get().strip().lower()
+        delta: Optional[float] = None if delta_txt in ("", "auto", "nyquist") else float(delta_txt)
         kw: Dict[str, Any] = dict(diameter_mm=d_mm, lam_min_um=g("lam_min") / 1000.0,
                                   lam_max_um=g("lam_max") / 1000.0, h_max_um=g("h_max"),
-                                  dh_um=g("dh"), ring_width_um=g("delta"),
+                                  dh_um=g("dh"), ring_width_um=delta,
                                   material=self.v["material"].get(), name="gui")
         if self.v["ap_mode"].get() == "na":
             kw["na"] = g("na")
@@ -163,24 +196,40 @@ class TradeoffApp:
         s = self._spec_or_warn()
         if s is None or self.busy:
             return
-        target = float(self.v["target_j"].get())
+        mode = self.v["req_mode"].get()
+        target: Optional[float] = None
+        klass: Optional[str] = None
+        if mode == "eff":
+            target = float(self.v["target_j"].get().strip().rstrip("%")) / 100.0   # percent -> fraction
+        elif mode == "class":
+            klass = self.v["target_class"].get()
+        paper = mode == "paper"
         frac = float(self.v["frac"].get())
+        refs = bool(self.v["show_refs"].get())
+        tol = float(self.v["class_tol"].get())
         lines = ["SPECIFICATION"] + ["  " + l for l in s.describe()]
         c0 = Ceiling(s, Ceiling.analytic_of(s))
         lines += ["", "CEILING (analytic, instant)"] + \
-                 ["  " + l for l in Feasibility(s, c0, target, frac).lines()[:2]]
-        lines += ["", "numeric alias-free ceiling running (%d x %d) ..." % (self.FAST["n_rho"], self.FAST["n_wavelengths"])]
+                 ["  " + l for l in Feasibility(s, c0, klass, None, class_tolerance=tol,
+                                                target_j=target, achievable_fraction=frac,
+                                                show_references=refs, paper_threshold=paper).lines()[:2]]
+        ref_cls = klass or (PAPER_THRESHOLD_CLASS if paper else None)
+        lines += ["", "numeric alias-free ceiling running (%d x %d)%s ..."
+                  % (self.FAST["n_rho"], self.FAST["n_wavelengths"],
+                     ", spec and %s reference" % ref_cls if ref_cls else "")]
         self._show(lines)
         self._start("numeric ceiling")
 
         def work() -> None:
             c = Ceiling.compute(s, numeric=True, **self.FAST)
-            f = Feasibility(s, c, target, frac)
+            cr = Ceiling.compute(reference_spec(ref_cls), numeric=True, **self.FAST) if ref_cls else None
+            f = Feasibility(s, c, klass, cr, class_tolerance=tol, target_j=target,
+                            achievable_fraction=frac, show_references=refs, paper_threshold=paper)
             out = ["SPECIFICATION"] + ["  " + l for l in s.describe()] + ["", "FEASIBILITY"] + \
                   ["  " + l for l in f.lines()]
             def show() -> None:
                 self._show(out)
-                self._done("feasibility: %s" % ("FEASIBLE" if f.feasible else "not feasible"))
+                self._done("feasibility: %s" % f.verdict)
             self.q.put(show)
         threading.Thread(target=work, daemon=True).start()
 
@@ -188,22 +237,30 @@ class TradeoffApp:
         s = self._spec_or_warn()
         if s is None or self.busy:
             return
-        self._start("pair map (%d x %d)" % (self.MAP["n_rho"], self.MAP["n_wavelengths"]))
+        analytic = self.v["pair_mode"].get() == "analytic"
+        self._start("pair map (%s)" % ("Eq. S16, instant" if analytic else
+                                       "Eq. S14, %d x %d" % (self.MAP["n_rho"], self.MAP["n_wavelengths"])))
 
         def work() -> None:
-            c = Ceiling.compute(s, numeric=True, **self.MAP)
-            rho, B = c.pair_map(self.MAP["n_rho"], self.MAP["n_wavelengths"])
-            J = float(c.numeric) if c.numeric is not None else float("nan")
+            if analytic:
+                rho, B = Ceiling.analytic_pair_map(s, self.MAP["n_rho"])
+                J = Ceiling.analytic_of(s)
+                J_map = Ceiling.analytic_from_map(s)
+                how = "Eq. S16 region |r1-r2| <= (n-1)H -> Eq. S17 max J(F) = %.3f (region integral %.3f)" % (J, J_map)
+            else:
+                c = Ceiling.compute(s, numeric=True, **self.MAP)
+                rho, B = c.pair_map(self.MAP["n_rho"], self.MAP["n_wavelengths"])
+                J = float(c.numeric) if c.numeric is not None else float("nan")
+                how = "Eq. S14 max Re J, alias-free -> Eq. S15 max J(F) <= %.3f" % J
 
             def draw() -> None:
                 self.ax.clear()
                 im = self.ax.imshow(B, origin="lower", extent=(0, 1, 0, 1), vmin=0, vmax=1, cmap="jet")
                 self.ax.set_xlabel("rho1 / R")
                 self.ax.set_ylabel("rho2 / R")
-                self.ax.set_title("max Re J(rho1, rho2): D %.2f mm, H %.1f um, NA %.3f, %.0f-%.0f nm "
-                                  "-> max J(F) <= %.3f" % (s.diameter_mm, s.h_max_um, s.NA,
-                                                          1000 * s.lam_min_um, 1000 * s.lam_max_um,
-                                                          J), fontsize=8)
+                self.ax.set_title("D %.2f mm, H %.1f um, NA %.3f, %.0f-%.0f nm\n%s"
+                                  % (s.diameter_mm, s.h_max_um, s.NA, 1000 * s.lam_min_um,
+                                     1000 * s.lam_max_um, how), fontsize=8)
                 if not getattr(self, "_cbar", None):
                     self._cbar = self.fig.colorbar(im, ax=self.ax)
                 self.canvas.draw()

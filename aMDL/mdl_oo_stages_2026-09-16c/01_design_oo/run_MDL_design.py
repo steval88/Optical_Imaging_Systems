@@ -269,6 +269,42 @@ S3_COMB_SOFTMIN_A1 = replace(S3_COMB_SOFTMIN, name="s3_comb_softmin_a1",
                              ring_quadrature="sinc", overlap_airy_factor=1.0,
                              dll_file_no=7)
 
+# 1-inch SWIR achromat, F/3, 1100-1500 nm (2026-09-16, from the trade-off
+# check: Nyquist DELTA = lam_min/(2 NA) = 3.35 -> 3.30 um, N = 3848 rings,
+# H = 40 um in 400 levels of 0.1 um (aspect ratio 12), fold order 22 .. 16,
+# rim fold period 147 um; ceilings Eq. S17 0.045 / Eq. S15 0.052, expected
+# continuous-band J ~ 0.03; a 9-line comb 1100:50:1500 nm is the paper-style
+# objective). Material: n_az4562 EXTRAPOLATED beyond 1.1 um and k = 0 --
+# measure n and k (O-H overtone at 1.40-1.45 um) before tape-out; 40 um of
+# resist needs a thick-film process (multi-coat AZ4562 / AZ 40XT / ma-P
+# 1275HV).
+SWIR_1IN_LAMS_9 = [round(1.10 + 0.05 * i, 3) for i in range(9)]          # 1.10 .. 1.50
+SWIR_1IN_F3_COMB = replace(S3_COMB_SOFTMIN_A1, name="swir_1in_f3_comb",
+                           diameter_um=25400.0, focal_um=76200.0, na=None,   # F/3 -> NA 0.1644
+                           lam_min_um=1.10, lam_max_um=1.50,
+                           target_wavelengths_um=SWIR_1IN_LAMS_9,
+                           n_wavelengths=501,                                  # alias-free >= 255
+                           ring_width_um=3.30, h_max_um=40.0, dh_um=0.10,
+                           seed_mode="ladder", seed_lam0_um=[1.15, 1.20, 1.30, 1.40, 1.45],
+                           fom_mode="softmin", overlap_fom=True, overlap_airy_factor=1.0,
+                           ring_quadrature="sinc",
+                           ga_blocks=3, ga_epochs=30, pop_size=24, gradient_iters=300,
+                           hja_max_sweeps=80, rng_seed=7,
+                           verify_wavelengths_um=SWIR_1IN_LAMS_9,
+                           verify_z_span_um=2500.0, verify_z_points=401,       # DOF lam/NA^2 = 41-56 um
+                           verify_r_max_um=40.0, verify_r_points=801,          # FWHM limit 3.4-4.6 um
+                           rzmap_r_max_um=25.0, rzmap_r_points=51,
+                           rzmap_z_span_um=1000.0, rzmap_z_points=121,
+                           dll_file_no=8)
+# the same lens on the continuous-band objective (paper Eq. 2 mean), to be
+# compared with the ceiling of the trade-off check (0.052 -> expect ~0.03)
+SWIR_1IN_F3_CONT = replace(SWIR_1IN_F3_COMB, name="swir_1in_f3_continuous",
+                           target_wavelengths_um=None, fom_mode="mean",
+                           overlap_fom=False, seed_mode="harmonic", dll_file_no=9)
+# relief-height variants of the comb design (ceiling 0.074 at 60 um, 0.097 at 80 um)
+SWIR_1IN_F3_COMB_H60 = replace(SWIR_1IN_F3_COMB, name="swir_1in_f3_comb_h60", h_max_um=60.0,
+                               dll_file_no=10)
+
 SETTINGS = S3_COMB_SOFTMIN_A1        # <-- EDIT: pick / customize a preset
 
 

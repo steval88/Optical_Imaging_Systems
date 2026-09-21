@@ -10,17 +10,27 @@ writes only into `<run>\` (per-solver subfolders `rs\`, `zemax\`, `nsc\`,
 ## 0. Explore the design space  (before choosing anything)
 
     python 01_design_oo\tradeoff_gui.py
-    python 01_design_oo\tradeoff_maps.py check --d-inch 2 --fnum 5 --h 45 --band 400,1100 --target 0.05
+    python 01_design_oo\tradeoff_maps.py check --d-inch 1 --fnum 3 --h 40 --band 1100,1500 [--target 0.03] [--class S3] [--refs]
     python 01_design_oo\tradeoff_maps.py study --preset PAPER_FIG1
 
 Type any aperture (mm or inch, no size limit), NA or F-number, band,
-relief height H, quanta and material: the tool prints the derived
-geometry (F, rings, fold orders, rim period, alias-free sampling, table
-sizes of a run), the ceiling of the continuous-band figure of merit
-max J_w(F) — analytic (paper Eq. 7) and numeric alias-free (Eqs.
-S14-S15) — and a feasibility verdict against a target J, with the H the
-target needs at that D / NA. Pair maps (paper Fig. 1b/c) and the (D, H)
-sweep (Fig. 1d) go to `runs\<stamp>_tradeoff_<name>\`.
+relief height H, quanta and material; the ring width defaults to the
+Nyquist width lam_min / (2 NA) (paper S2-6; S3: 2 um, NA 0.3 at 450 nm:
+0.75 -> 0.7 um) and a wider one is flagged. The tool prints the derived
+geometry (F, rings, fold orders, rim period, aspect ratio, alias-free
+sampling, table sizes of a run), the ceiling of the continuous-band
+figure of merit max J_w(F) — semi-analytic (paper Eqs. S16-S18: the
+constructive band |r1 - r2| <= (n-1)H, max J = 1 - (1 - x)^2 with
+x = 2(n-1)Hf/R^2, the hyperbolic-phase D_max) and numeric alias-free
+(Eqs. S14-S15) — the expected design J (55 % of the ceiling) and the
+Nyquist check. Targets are OPTIONAL: `--target J` judges an absolute
+continuous-band J (H_required / D_max from Eq. S19); `--class S3`
+compares with one of the paper's visible-band lenses S1..S5 on the same
+scale (`--refs` only shows where they sit). Without a target the check
+is informational. The pair map can be numeric (Eq. S14) or the
+semi-analytic Eq. S16 region.
+Pair maps (paper Fig. 1b/c) and the (D, H) sweep (Fig. 1d) go to
+`runs\<stamp>_tradeoff_<name>\`.
 
 ## 1. Choose the design settings  (edit, no command)
 
