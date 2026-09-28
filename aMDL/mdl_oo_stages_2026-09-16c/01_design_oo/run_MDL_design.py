@@ -305,7 +305,25 @@ SWIR_1IN_F3_CONT = replace(SWIR_1IN_F3_COMB, name="swir_1in_f3_continuous",
 SWIR_1IN_F3_COMB_H60 = replace(SWIR_1IN_F3_COMB, name="swir_1in_f3_comb_h60", h_max_um=60.0,
                                dll_file_no=10)
 
-SETTINGS = S3_COMB_SOFTMIN_A1        # <-- EDIT: pick / customize a preset
+
+# S3 run 3 re-optimized with the rigorous/scalar efficiency table of the
+# NSC ladder (nscval 2026-09-18.06, srg_step_RCWA short staircases at the
+# design's 2.0 um tread: 0.90-1.04, nearly achromatic; table written by
+# `mdl_nsc_validation.py corr`). Compare J_final and the per-line
+# efficiencies with 20260916_071220_s3_comb_softmin_a1.
+S3_COMB_SOFTMIN_A1_CORR = replace(
+    S3_COMB_SOFTMIN_A1, name="s3_comb_softmin_a1_corr",
+    efficiency_corr_npz=r"runs\20260916_071220_s3_comb_softmin_a1\rcwa\20260921_151142_corr\efficiency_corr.npz",
+    dll_file_no=13)
+
+S3_COMB_SOFTMIN_A1_RCWA = replace(
+    S3_COMB_SOFTMIN_A1, name="s3_comb_softmin_a1_rcwa",
+    efficiency_corr_npz=r"runs\20260916_071220_s3_comb_softmin_a1\rcwa\20260921_151142_table\efficiency_corr.npz",
+    init_design_npy=r"runs\20260916_071220_s3_comb_softmin_a1\m_final.npy",
+    dll_file_no=13)
+
+SETTINGS = S3_COMB_SOFTMIN_A1_RCWA   # <-- EDIT: pick / customize a preset
+
 
 
 # =========================================================================

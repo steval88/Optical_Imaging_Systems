@@ -580,3 +580,123 @@ package supplies the connection and the log).
   few-percent, nearly achromatic discount: J will move little), and
   the fold reset (rung 4, srg_user_defined with the real zone profile)
   remains the open item.
+* 2026-09-21 -- THE CORRECTION APPLIED TO THE S3 DESIGN. corr mode on the
+  ladder folder -> efficiency_corr.npz (0.904-1.044). Run
+  20260921_100830_s3_comb_softmin_a1_corr (file 11): same fold, pipeline
+  x 0.909 throughout (J_final 0.1272 vs 0.1400). The 2 x 2 of
+  01_design_oo/efficiency_corr_check.py (both vectors, both tables):
+  run-3 vector 0.1400 (bare) / 0.1355 (corrected); corrected-run vector
+  0.1292 / 0.1272. So the PHYSICS costs 3.2 % (per line 0.925 at 400 nm
+  .. 0.994 at 1100 nm, worst line 1100 -> 400 nm) and the re-optimized
+  vector is simply a worse GA sample (-6 % under both tables, 84 % of
+  the rings moved). Design of record stays run 3 at J 0.1355 corrected.
+  The tread-level TEA error is NOT what limits the S3 lens; the fold
+  reset (rung 4) is the open item. Next: warm start (init_design_npy =
+  run 3's m_final) on the corrected tables, then rung 4.
+* 2026-09-21 -- RUNG 4 MOVES OUT OF OPTICSTUDIO: 02_RCWA_Validation_OOP
+  (rcwaval 2026-09-21.01). Decision (Stefano): the fold-reset question
+  is answered with a Python RCWA on zone_table.npz, the srg DLLs kept as
+  a cross-check. Own 1-D solver (Moharam-Gaylord, Rumpf S-matrix, Li's
+  rule; numpy + scipy), validated: Fresnel / thin film exact, energy 1 -
+  1e-8, EMT limits, grcwa 0.1.2 on the null staircase (TE 0.7721 =
+  0.7721, TM 0.8036 vs 0.8067), the srg_step ladder lines within 4.4 %.
+  FINDING ON THE srg DLLs: they compute a FREE-STANDING relief (the
+  object's medium on both sides): free-standing numbers match them,
+  resist -> air numbers do not, and their "Reflect power 0.032" is the
+  free-standing 3 %. The srg_blaze null value 0.8234 sits between the
+  5-level (0.789) and the 6-level-half-ends (0.832) slicings of the
+  sawtooth -- the DLL's staircase rule is undocumented. The lens is
+  resist -> air; the two geometries differ by up to 8 % on a 4-tread
+  staircase, so the ladder table of 2026-09-18 is the right order of
+  magnitude but not the right geometry. First zone sweep on the S3-like
+  smoke table (31 zones): P 22 um / 11 rings at 1.05-1.10 um: ratio 0.85
+  (the fold wall at a low-order blaze -- exactly what the ladder could
+  not see), 0.95-1.01 elsewhere; P 46 um: 0.89-0.97. Instabilities
+  found and fixed on the way: the sqrt branch of propagating modes
+  (round-off flipped forward modes -> S-matrix blow-up at random N),
+  an order exactly at cut-off in the gap medium (P = 50 lam), BLAS
+  thread oversubscription across workers (4 workers slower than 1).
+* 2026-09-21 11:14 -- THE S3 ZONE SWEEP (rcwaval .01, 19 min on 11
+  workers; estimate said 7 -- hyperthreads): 172 zones, 108 solved (879
+  cells), 21 wide zones (P 62-312 um) unsolved, 43 zones without a
+  well-defined order (2-3-ring fragments and the inner zones 1-11).
+  Raw ratio eta_RCWA / (scalar staircase x Fresnel) per cell: median
+  0.805, range 0.02-2.6 -- the extremes where the scalar reference is
+  small (3.7 on 0.009). Reflection 8-20 % per zone (vs 5.8 % flat):
+  the deep relief reflects more. THE HEADLINE: the real zones deliver
+  about 80 % of what the scalar model promises -- the fold reset and
+  the deep irregular profiles cost ~20 %, seven times the tread-level
+  3 % the srg ladder measured. rcwaval 2026-09-21.02: table.py /
+  rcwa_corr_table.py turn the cells into the design's table (cells with
+  eta_scalar < 0.10 dropped, clipped [0.3, 1.3], gaps interpolated,
+  running median over 5 zones in r, unsolved wide zones left to the
+  design's interpolation, r = 0 anchor at 1.0) with raw / smoothed maps
+  side by side.
+* 2026-09-21 14:31 -- LUMERICAL FDTD WITNESS OF THE RCWA (rcwaval .08-.11,
+  lumerical_zone_check.py through lumapi v241, 2-D periodic cell, plane
+  wave from the substrate, T / R line monitors, `grating` per order).
+  Zone 34 at 0.400 um (P 22 um, 11 rings, tallest ring 10.374 um = 43
+  wavelengths of resist): sign convention confirmed (Lumerical's order
+  is the physical one, n = -m_solver; mirror order 0.009 vs 0.508), T / R
+  0.908 / 0.092 against the RCWA's 0.902 / 0.098, but the focusing order
+  0.508 against 0.441 (+15 %). The RCWA is converged (110 -> 275
+  harmonics: 0.4410 -> 0.4392, rcwa_converge.py). The FDTD is not: the
+  Yee grid at 12 nm (20 points per wavelength in the resist) accumulates
+  0.93 rad of excess phase over the pillar (0.12 rad over the air path
+  beside it), equivalent to solving at n + 0.0049. The RCWA at n + 0.005
+  gives TE 0.5253 / TM 0.4962 -- the FDTD gave TE 0.5253 / TM 0.4910, and
+  the +-3 window agrees to 1 %. Two solvers agree once the mesh error is
+  put into the other one: the sweep's numbers stand, and the FDTD is a
+  usable witness only where dn_equivalent is small (the log now prints
+  it per cell: 0.0007 at 1.0 um on the same pillar with the same mesh;
+  6 nm at 0.4 um still leaves 0.0012). DESIGN FINDING from the same
+  table: this zone's efficiency moves +8 % / +16 % / +23 % for dn =
+  0.0025 / 0.005 / 0.0075 -- the 17-wave fold-reset pillars make the
+  short-end efficiency of the S3 design depend on the resist index to
+  +-0.002, inside the uncertainty of a dispersion fit. A measured n(lam)
+  of the actual AZ4562 batch should replace the fit before fabrication,
+  and the tolerance belongs in the findings doc.
+* 2026-09-21 14:38 -- WITNESS CLOSED AT THE LONG END. Zone 34 at 1.000 um
+  (same pillar, mesh-equivalent dn 0.0007): FDTD 0.4494 vs RCWA 0.4564
+  unpolarized (ratio 0.985; TE 0.4621 / 0.4661, TM 0.4367 / 0.4468), the
+  +-3 window order by order (0.034 / 0.035, 0.047 / 0.051, 0.208 / 0.215,
+  0.462 / 0.456, 0.038 / 0.036). Zone 158 (P 58 um, 29 rings, h_max 11.3
+  um) at 1.000 um, a cell the sweep excluded as "order not well defined":
+  the FDTD splits the power 0.386 / 0.182 between orders +5 and +6 --
+  the focusing direction falls between two orders of that period, which
+  is what the exclusion rule is for. The sweep's table is witnessed at
+  both ends of the band on the tallest pillars it contains; the Lumerical
+  stage is done unless a specific zone is questioned.
+* 2026-09-21 15:11 -- THIRD WITNESS POINT AND THE RUNG-4 TABLE. Zone 158
+  at 1.000 um in the RCWA (rcwa_converge.py, no exclusion rule): +5 0.3941,
+  +6 0.1791 vs the FDTD's 0.3818 / 0.181 -- 3 % and 1 % on the most
+  complex cell in the table (P 58 um, 26 levels). rcwa_corr_table.py on
+  the S3 sweep (eta_min 0.10, clip [0.3, 1.3], smooth 5, balance 1e-3):
+  879 cells, 782 kept, 97 weak dropped, 24 clipped; kept-ratio median
+  0.803. Width-weighted mean of the correction per line: 0.872 (0.40),
+  0.868 (0.45), 0.839, 0.821, 0.843, 0.827, 0.808, 0.795 (0.75), 0.778
+  (0.85), 0.768, 0.757, 0.784, 0.753, 0.771 (1.10); band mean 0.806.
+  The loss grows toward the long end, where a zone spans fewer
+  wavelengths and the fold walls are a larger share of the aperture --
+  the fold reset, not the tread shape. Table: 14 lines x 109 radii,
+  runs\20260916_071220_s3_comb_softmin_a1\rcwa\20260921_151142_table\
+  efficiency_corr.npz. Next: warm start of run 3 under this table
+  (dll_file_no 13) and the 2 x 2 (efficiency_corr_check.py); expected J
+  of run 3 under the table ~0.11 with a tilt against the long lines.
+* 2026-09-21 16:00 -- RUNG 4 CLOSED (findings: 02_RCWA_Validation_OOP\
+  FINDINGS_2026-09-21_rung4.md). Warm start of run 3 under the RCWA
+  table (run 20260921_152146_s3_comb_softmin_a1_rcwa, file 13): 0.1134
+  (beta 20) -> Search 0.1258 -> Smooth 0.1012 -> Gradient 0.1130 ->
+  Polish 0.1143; 28 % of the rings moved by 9 levels. Its own zone sweep
+  (138 zones, 75 solvable, 611 cells, 14 min): median 0.809, per-line
+  means 0.856 (0.40) .. 0.743 (1.10), band mean 0.809. The 2 x 2 under
+  the new design's own table (efficiency_corr_check.py --table, new in
+  2026-09-21.14): run-3 vector 0.1400 bare / 0.1074 corrected, re-designed
+  vector 0.1386 / 0.1134; under run 3's table 0.1070 / 0.1143 -- < 1 %
+  between the tables, fixed point in one iteration. Physics x 0.767,
+  optimizer x 1.056 (balance: worst line 1050 nm 0.0997 -> 0.1094, all 14
+  lines within 0.1094-0.1229), scalar cost x 0.990. Candidate design of
+  record: file 13 at J 0.1134, pending run_verify / mtf_verify / huy on
+  its folder. Pipeline note: Smooth costs 20 % in every run and nothing
+  re-enforces the aspect-ratio rule after it (10.4 um pillar on one 2 um
+  ring in run 3's zone 34).
